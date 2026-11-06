@@ -28,7 +28,7 @@ jobs:
         run: python -m py_compile custom_components/omnibattery/__init__.py custom_components/omnibattery/control/phase_runtime.py custom_components/omnibattery/control/phase_config.py custom_components/omnibattery/number.py custom_components/omnibattery/switch.py custom_components/omnibattery/text.py
       - name: Execute isolated phase unit tests
         run: |
-          python -m pip install pytest
+          python -m pip install pytest pytest-asyncio
           python scripts/test_phase_isolated.py
       - name: Commit tested controller integration
         run: |
