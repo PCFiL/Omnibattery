@@ -316,6 +316,7 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.SWITCH,
     Platform.NUMBER,
+    Platform.TEXT,
     Platform.SELECT,
     Platform.BUTTON,
 ]
@@ -652,6 +653,9 @@ def _delivered_toward(data: dict, cell_power: float, *, is_charge: bool) -> floa
     return max(0.0, delivered)
 
 
+from .control.phase_write_lock import serialized_battery_write
+
+
 class ChargeDischargeController:
     """Controller to manage charge/discharge logic for all batteries."""
 
@@ -660,6 +664,7 @@ class ChargeDischargeController:
         self.hass = hass
         self.coordinators = coordinators
         self.config_entry = config_entry
+        self._phase_runtime = None
         self.primary_consumption_sensor = consumption_sensor
         self.offgrid_power_sensor = config_entry.data.get(CONF_OFFGRID_POWER_SENSOR)
         self.offgrid_meter_inverted = config_entry.data.get(
@@ -2453,6 +2458,10 @@ class ChargeDischargeController:
         return [
             coordinator for coordinator in self.coordinators
             if not ChargeDischargeController._is_battery_manual_owned(coordinator)
+            and not (
+                getattr(self, "_phase_runtime", None) is not None
+                and coordinator.name in self._phase_runtime.active_batteries
+            )
         ]
 
     def _reset_battery_ownership_state(
@@ -4226,6 +4235,11 @@ class ChargeDischargeController:
             # Individual manual mode is an ownership boundary, not an
             # operation blocker. Exclude it before availability and blocker
             # evaluation so planning cannot select or classify it as automatic.
+            if (
+                getattr(self, "_phase_runtime", None) is not None
+                and coordinator.name in self._phase_runtime.active_batteries
+            ):
+                continue
             if getattr(coordinator, CONF_BATTERY_MANUAL_MODE_ENABLED, False):
                 _LOGGER.debug(
                     "%s: Skipping - individual manual mode owns this battery",
@@ -6654,6 +6668,7 @@ class ChargeDischargeController:
         )
         await coordinator.apply_power(intended)
 
+    @serialized_battery_write
     async def _set_battery_power(
         self,
         coordinator: MarstekVenusDataUpdateCoordinator,
@@ -6678,7 +6693,7 @@ class ChargeDischargeController:
 
         Returns True if command was acknowledged, False otherwise.
         """
-        if owner == "automatic" and getattr(
+        if (owner == "automatic" or owner.startswith("phase:")) and getattr(
             coordinator, CONF_BATTERY_MANUAL_MODE_ENABLED, False
         ):
             _LOGGER.debug(
@@ -6686,6 +6701,16 @@ class ChargeDischargeController:
                 getattr(coordinator, "name", coordinator),
             )
             return False
+
+        # Exclusive automatic write boundary for phase-owned batteries.
+        phase_runtime = getattr(self, "_phase_runtime", None)
+        if phase_runtime is not None:
+            if owner == "automatic" and coordinator.name in phase_runtime.active_batteries:
+                return False
+            if owner.startswith("phase:"):
+                channel = phase_runtime.by_phase.get(owner[6:])
+                if channel is None or not channel.enabled or channel.battery_key != coordinator.name:
+                    return False
 
         # Skip if battery is unreachable
         if not coordinator.is_available:
@@ -6713,7 +6738,7 @@ class ChargeDischargeController:
             return False
 
         # Skip if a manual time slot already commanded this coord this cycle.
-        if owner == "automatic" and self._is_manual_slot_owned(coordinator):
+        if (owner == "automatic" or owner.startswith("phase:")) and self._is_manual_slot_owned(coordinator):
             _LOGGER.debug(
                 "[%s] Skipping power write - manual time slot owns this battery",
                 coordinator.name
@@ -7869,6 +7894,8 @@ class ChargeDischargeController:
         async with self._control_lock:
             self._last_cycle_monotonic = time.monotonic()
             await self._run_control_cycle(now)
+            if self._phase_runtime is not None and not getattr(self, "_unloading", False):
+                await self._phase_runtime.run()
 
     def _schedule_no_pd_debounced_run(self):
         """Arm a one-shot deferred control cycle for the no-PD command delay.
@@ -10987,6 +11014,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up the charge/discharge controller BEFORE storing in hass.data
     # This allows the controller to register itself in hass.data[DOMAIN]["pid_controller"]
     controller = ChargeDischargeController(hass, coordinators, entry.data["consumption_sensor"], entry)
+    from .control.phase_runtime import PhaseRuntime
+    try:
+        controller._phase_runtime = PhaseRuntime(controller)
+    except (ValueError, TypeError, KeyError) as err:
+        raise ConfigEntryNotReady(f"Invalid per-phase PD configuration: {err}") from err
     # This is advisory only and is evaluated at setup and after option updates,
     # independently of grid-sensor health or the control loop.
     controller._check_solar_forecast_migration()
