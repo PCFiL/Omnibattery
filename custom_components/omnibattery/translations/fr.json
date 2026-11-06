@@ -1415,6 +1415,78 @@
           "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
           "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
         }
+      },
+      "phase_pd_l1": {
+        "title": "Phase L1 — configuration PD",
+        "description": "Configurez chaque phase séparément. Les contrôleurs restent désactivés. Avant de modifier une affectation active, désactivez les interrupteurs PD L1/L2/L3.",
+        "data": {
+          "battery": "Batterie à piloter",
+          "grid_sensor": "Capteur Shelly de puissance réseau (W)",
+          "target_w": "Puissance réseau cible (W)",
+          "deadband_w": "Bande morte (W)",
+          "max_step_w": "Variation maximale par commande (W)",
+          "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
+          "kp": "Gain proportionnel Kp",
+          "kd": "Gain dérivé Kd"
+        },
+        "data_description": {
+          "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
+          "grid_sensor": "Sélectionnez le capteur de puissance active du Shelly Pro 3EM pour cette phase (W ou kW). Positif = importation ; négatif = injection.",
+          "target_w": "Puissance réseau visée sur cette phase. 0 W cherche l’équilibre ; une petite valeur positive conserve une marge d’importation.",
+          "deadband_w": "Zone autour de la cible dans laquelle aucune correction n’est demandée. 50 W constitue un bon réglage initial.",
+          "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
+          "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
+          "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+        }
+      },
+      "phase_pd_l2": {
+        "title": "Phase L2 — configuration PD",
+        "description": "Configurez chaque phase séparément. Les contrôleurs restent désactivés. Avant de modifier une affectation active, désactivez les interrupteurs PD L1/L2/L3.",
+        "data": {
+          "battery": "Batterie à piloter",
+          "grid_sensor": "Capteur Shelly de puissance réseau (W)",
+          "target_w": "Puissance réseau cible (W)",
+          "deadband_w": "Bande morte (W)",
+          "max_step_w": "Variation maximale par commande (W)",
+          "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
+          "kp": "Gain proportionnel Kp",
+          "kd": "Gain dérivé Kd"
+        },
+        "data_description": {
+          "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
+          "grid_sensor": "Sélectionnez le capteur de puissance active du Shelly Pro 3EM pour cette phase (W ou kW). Positif = importation ; négatif = injection.",
+          "target_w": "Puissance réseau visée sur cette phase. 0 W cherche l’équilibre ; une petite valeur positive conserve une marge d’importation.",
+          "deadband_w": "Zone autour de la cible dans laquelle aucune correction n’est demandée. 50 W constitue un bon réglage initial.",
+          "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
+          "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
+          "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+        }
+      },
+      "phase_pd_l3": {
+        "title": "Phase L3 — configuration PD",
+        "description": "Configurez chaque phase séparément. Les contrôleurs restent désactivés. Avant de modifier une affectation active, désactivez les interrupteurs PD L1/L2/L3.",
+        "data": {
+          "battery": "Batterie à piloter",
+          "grid_sensor": "Capteur Shelly de puissance réseau (W)",
+          "target_w": "Puissance réseau cible (W)",
+          "deadband_w": "Bande morte (W)",
+          "max_step_w": "Variation maximale par commande (W)",
+          "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
+          "kp": "Gain proportionnel Kp",
+          "kd": "Gain dérivé Kd"
+        },
+        "data_description": {
+          "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
+          "grid_sensor": "Sélectionnez le capteur de puissance active du Shelly Pro 3EM pour cette phase (W ou kW). Positif = importation ; négatif = injection.",
+          "target_w": "Puissance réseau visée sur cette phase. 0 W cherche l’équilibre ; une petite valeur positive conserve une marge d’importation.",
+          "deadband_w": "Zone autour de la cible dans laquelle aucune correction n’est demandée. 50 W constitue un bon réglage initial.",
+          "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
+          "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
+          "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+        }
       }
     },
     "error": {
@@ -1465,7 +1537,8 @@
       "phase_pd_sensor_unit": "Le capteur sélectionné doit mesurer en W ou kW."
     },
     "abort": {
-      "phase_pd_disable_first": "Désactivez tous les contrôleurs PD de phase avant de modifier les affectations."
+      "phase_pd_disable_first": "Désactivez tous les contrôleurs PD de phase avant de modifier les affectations.",
+      "phase_pd_invalid_step": "Assistant de configuration désynchronisé. Recommencez la configuration."
     }
   },
   "selector": {

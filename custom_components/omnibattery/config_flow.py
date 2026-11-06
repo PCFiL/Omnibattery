@@ -3804,10 +3804,19 @@ class OptionsFlowHandler(OptionsFlow):
             return self.async_abort(reason="phase_pd_disable_first")
         self._phase_pd_pending = []
         self._phase_pd_index = 0
-        return await self.async_step_phase_pd_phase()
+        return await self.async_step_phase_pd_l1()
 
-    async def async_step_phase_pd_phase(
-        self, user_input: dict[str, Any] | None = None
+    async def async_step_phase_pd_l1(self, user_input=None) -> FlowResult:
+        return await self._async_phase_pd_step("L1", user_input)
+
+    async def async_step_phase_pd_l2(self, user_input=None) -> FlowResult:
+        return await self._async_phase_pd_step("L2", user_input)
+
+    async def async_step_phase_pd_l3(self, user_input=None) -> FlowResult:
+        return await self._async_phase_pd_step("L3", user_input)
+
+    async def _async_phase_pd_step(
+        self, selected_phase: str, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Pick a configured battery and power entity for each physical phase."""
         from .control.phase_config import PHASES, channel_data, KEY
@@ -3817,6 +3826,8 @@ class OptionsFlowHandler(OptionsFlow):
             self.config_data[KEY] = validate_phase_group(self._phase_pd_pending)
             return await self._save_and_finish()
         phase = PHASES[index]
+        if selected_phase != phase:
+            return self.async_abort(reason="phase_pd_invalid_step")
         names = [b[CONF_NAME] for b in self.config_entry.data.get("batteries", [])]
         if not names:
             return self.async_abort(reason="no_battery")
@@ -3841,7 +3852,10 @@ class OptionsFlowHandler(OptionsFlow):
                 else:
                     self._phase_pd_pending.append(validated)
                     self._phase_pd_index = index + 1
-                    return await self.async_step_phase_pd_phase()
+                    if self._phase_pd_index == len(PHASES):
+                        self.config_data[KEY] = validate_phase_group(self._phase_pd_pending)
+                        return await self._save_and_finish()
+                    return await getattr(self, f"async_step_phase_pd_{PHASES[self._phase_pd_index].lower()}")()
 
         def number_field(key, minimum, maximum, step=1):
             return NumberSelector(NumberSelectorConfig(
@@ -3862,7 +3876,7 @@ class OptionsFlowHandler(OptionsFlow):
             if sensor_default else vol.Required("grid_sensor")
         )
         return self.async_show_form(
-            step_id="phase_pd_phase",
+            step_id=f"phase_pd_{phase.lower()}",
             description_placeholders={"phase": phase},
             data_schema=vol.Schema({
                 vol.Required("battery", default=current.get("battery") or names[0]):
