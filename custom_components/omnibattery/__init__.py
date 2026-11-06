@@ -6845,7 +6845,11 @@ class ChargeDischargeController:
         # the phase budget twice; direct automatic commands are capped against
         # the other batteries' current orders.
         phase_limiter = getattr(self, "_phase_power_limiter", None)
-        if owner == "automatic" and phase_limiter is not None and phase_limiter.enabled:
+        if (
+            (owner == "automatic" or owner.startswith("phase:"))
+            and phase_limiter is not None
+            and phase_limiter.enabled
+        ):
             charge_power, discharge_power = phase_limiter.limit_single_command(
                 coordinator,
                 charge_power,
@@ -7893,9 +7897,13 @@ class ChargeDischargeController:
             return
         async with self._control_lock:
             self._last_cycle_monotonic = time.monotonic()
-            await self._run_control_cycle(now)
-            if self._phase_runtime is not None and not getattr(self, "_unloading", False):
-                await self._phase_runtime.run()
+            try:
+                await self._run_control_cycle(now)
+            finally:
+                # Meter-loss standby is safety-critical: run even if a fleet
+                # planning stage raises before the normal phase dispatch.
+                if self._phase_runtime is not None and not getattr(self, "_unloading", False):
+                    await self._phase_runtime.run()
 
     def _schedule_no_pd_debounced_run(self):
         """Arm a one-shot deferred control cycle for the no-PD command delay.
