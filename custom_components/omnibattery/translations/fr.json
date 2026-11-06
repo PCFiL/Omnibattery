@@ -1404,6 +1404,16 @@
           "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
           "kp": "Gain proportionnel Kp",
           "kd": "Gain dérivé Kd"
+        },
+        "data_description": {
+          "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
+          "grid_sensor": "Sélectionnez le capteur de puissance active du Shelly Pro 3EM pour cette phase (W ou kW). Positif = importation ; négatif = injection.",
+          "target_w": "Puissance réseau visée sur cette phase. 0 W cherche l’équilibre ; une petite valeur positive conserve une marge d’importation.",
+          "deadband_w": "Zone autour de la cible dans laquelle aucune correction n’est demandée. 50 W constitue un bon réglage initial.",
+          "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
+          "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
+          "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
         }
       }
     },
