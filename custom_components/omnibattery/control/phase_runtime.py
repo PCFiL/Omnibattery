@@ -165,7 +165,7 @@ class PhaseRuntime:
                 self._recovery_started.pop(phase, None)
                 await self._force_zero(channel, battery, now=now)
                 self.safety_status[phase] = (
-                    "meter_lost_stopped" if phase in self._stop_confirmed
+                    "meter_lost_stop_command_accepted" if phase in self._stop_confirmed
                     else "meter_lost_stop_unconfirmed"
                 )
                 continue
@@ -196,7 +196,7 @@ class PhaseRuntime:
             if phase not in self._initialized:
                 await self._force_zero(channel, battery, now=now)
                 self.safety_status[phase] = (
-                    "startup_zero_accepted" if phase in self._initialized
+                    "startup_zero_command_accepted" if phase in self._initialized
                     else "startup_zero_unconfirmed"
                 )
                 continue
@@ -222,6 +222,9 @@ class PhaseRuntime:
             )
             if ok:
                 self.manager.acknowledge(phase, proposed, now=now)
+                if proposed != 0:
+                    # The earlier zero ACK no longer reflects the setpoint.
+                    self._stop_confirmed.discard(phase)
                 self.safety_status[phase] = "normal_command_accepted"
             else:
                 self.safety_status[phase] = "normal_command_unconfirmed"
