@@ -90,6 +90,7 @@ async def async_setup_entry(
             ("target_w", -500, 500),
             ("deadband_w", 0, 500),
             ("max_step_w", 0, 1000),
+            ("min_command_interval_s", 5, 120),
             ("kp", 0, 3),
             ("kd", 0, 30),
         ):
@@ -1300,9 +1301,12 @@ class PhasePdNumber(NumberEntity):
         self._attr_name = f"PD {phase} {field.replace('_', ' ')}"
         self._attr_native_min_value = minimum
         self._attr_native_max_value = maximum
-        if field not in ("kp", "kd"):
+        if field in ("target_w", "deadband_w", "max_step_w"):
             self._attr_native_unit_of_measurement = "W"
             self._attr_native_step = 5
+        elif field == "min_command_interval_s":
+            self._attr_native_unit_of_measurement = "s"
+            self._attr_native_step = 1
 
     @property
     def native_value(self):
