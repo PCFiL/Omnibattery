@@ -18,9 +18,7 @@ from homeassistant.helpers.event import (
 
 from .control.phase_config import PHASES, channel_data
 from .control.phase_dry_run import estimate_phase
-from .control.phase_meter_fallback import (
-    MQTT_PRIMARY, NATIVE_FALLBACK, select_phase_meter,
-)
+from .control.phase_meter_fallback import select_phase_meter
 
 
 class PhaseDryRunSensor(SensorEntity):
@@ -47,10 +45,10 @@ class PhaseDryRunSensor(SensorEntity):
         # an executor, where async_write_ha_state() is not thread-safe.
         # Listen to primary/fallback sensor changes for immediate updates;
         # keep the timer to detect stale sensors even with no state changes.
-        configured = channel_data(self.entry, self.phase).get("grid_sensor")
-        observed = {configured} if configured else set()
-        if configured == MQTT_PRIMARY[self.phase]:
-            observed.add(NATIVE_FALLBACK[self.phase])
+        settings = channel_data(self.entry, self.phase)
+        configured = settings.get("grid_sensor")
+        secondary = settings.get("fallback_grid_sensor")
+        observed = {configured, secondary}
         observed.discard(None)
         if observed:
             self.async_on_remove(async_track_state_change_event(
@@ -79,12 +77,14 @@ class PhaseDryRunSensor(SensorEntity):
         data = channel_data(self.entry, self.phase)
         battery_name = data.get("battery") or ""
         sensor_id = data.get("grid_sensor") or ""
+        secondary_id = data.get("fallback_grid_sensor") or ""
         configured = bool(battery_name and sensor_id.startswith("sensor."))
         selected = (
             select_phase_meter(
                 self.hass.states,
                 phase=self.phase,
                 primary_entity_id=sensor_id,
+                fallback_entity_id=secondary_id or None,
                 max_age_s=15,
             ) if configured else None
         )
@@ -106,6 +106,7 @@ class PhaseDryRunSensor(SensorEntity):
         self._fallback_reason = selected.fallback_reason if selected else None
         self._battery_name = battery_name
         self._sensor_id = sensor_id
+        self._secondary_id = secondary_id
         self._live_pd_enabled = bool(data.get("enabled", False))
         self._kd = float(data.get("kd", 0))
 
@@ -120,6 +121,7 @@ class PhaseDryRunSensor(SensorEntity):
             "phase": self.phase,
             "battery": self._battery_name,
             "grid_sensor": self._sensor_id,
+            "fallback_grid_sensor": self._secondary_id or None,
             "active_grid_sensor": self._active_sensor_id,
             "meter_source": self._meter_source,
             "primary_meter_error": self._primary_reason,
@@ -167,6 +169,7 @@ class PhaseDryRunMetricSensor(PhaseDryRunSensor):
             "phase": self.phase,
             "battery": self._battery_name,
             "grid_sensor": self._sensor_id,
+            "fallback_grid_sensor": self._secondary_id or None,
             "active_grid_sensor": self._active_sensor_id,
             "meter_source": self._meter_source,
             "command_sent": False,
