@@ -48,8 +48,10 @@ class PhaseDryRunSensor(SensorEntity):
         settings = channel_data(self.entry, self.phase)
         configured = settings.get("grid_sensor")
         secondary = settings.get("fallback_grid_sensor")
-        observed = {configured, secondary}
-        observed.discard(None)
+        observed = {
+            entity_id for entity_id in (configured, secondary)
+            if isinstance(entity_id, str) and entity_id.startswith("sensor.")
+        }
         if observed:
             self.async_on_remove(async_track_state_change_event(
                 self.hass, sorted(observed), self._on_meter_changed
