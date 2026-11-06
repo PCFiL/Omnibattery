@@ -23,6 +23,8 @@ class PhaseChannel:
     deadband_w: float = 50.0
     min_command_interval_s: float = 5.0
     max_step_w: float = 800.0
+    kp: float = 1.0
+    kd: float = 0.0
 
     def __post_init__(self):
         if self.phase not in ("L1", "L2", "L3"):
@@ -30,6 +32,7 @@ class PhaseChannel:
         PhaseAssignment(
             self.battery_key, self.grid_sensor, self.target_w,
             self.deadband_w, self.min_command_interval_s, self.max_step_w,
+            self.kp, self.kd,
         )
 
 
@@ -61,7 +64,7 @@ class PhaseChannelManager:
         self.planner = PerPhasePlanner(tuple(
             PhaseAssignment(
                 c.battery_key, c.grid_sensor, c.target_w, c.deadband_w,
-                c.min_command_interval_s, c.max_step_w,
+                c.min_command_interval_s, c.max_step_w, c.kp, c.kd,
             )
             for c in self.channels
         ))
