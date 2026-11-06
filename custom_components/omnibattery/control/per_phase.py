@@ -18,16 +18,18 @@ class PhaseAssignment:
     deadband_w: float = 50.0
     min_command_interval_s: float = 5.0
     max_step_w: float = 800.0
+    kp: float = 1.0
+    kd: float = 0.0
 
     def __post_init__(self):
         if not self.battery_key or not self.grid_sensor.startswith("sensor."):
             raise ValueError("Battery key and grid sensor required")
         if not all(isfinite(v) for v in (
             self.target_w, self.deadband_w,
-            self.min_command_interval_s, self.max_step_w,
+            self.min_command_interval_s, self.max_step_w, self.kp, self.kd,
         )):
             raise ValueError("Nonfinite control parameter")
-        if min(self.deadband_w, self.min_command_interval_s, self.max_step_w) < 0:
+        if min(self.deadband_w, self.min_command_interval_s, self.max_step_w, self.kp, self.kd) < 0:
             raise ValueError("Negative control limit")
 
 
@@ -35,6 +37,8 @@ class PhaseAssignment:
 class PhaseState:
     last_command_w: float = 0.0
     last_command_at: float | None = None
+    previous_error: float | None = None
+    pending_error: float | None = None
 
 
 @dataclass
@@ -79,10 +83,16 @@ class PerPhasePlanner:
         if abs(error) <= assignment.deadband_w:
             return None
         # Import -> discharge (negative command); export -> charge (positive).
+        derivative = 0.0
+        if state.previous_error is not None and state.last_command_at is not None:
+            dt = timestamp - state.last_command_at
+            if dt > 0:
+                derivative = (error - state.previous_error) / dt
         delta = max(
             -assignment.max_step_w,
-            min(assignment.max_step_w, -error),
+            min(assignment.max_step_w, -assignment.kp * error - assignment.kd * derivative),
         )
+        state.pending_error = error
         request = state.last_command_w + delta
         request = max(-max_discharge_w, min(max_charge_w, request))
         return request if request != state.last_command_w else None
@@ -99,3 +109,6 @@ class PerPhasePlanner:
         state = self.states[battery_key]
         state.last_command_w = command_w
         state.last_command_at = timestamp
+        if state.pending_error is not None:
+            state.previous_error = state.pending_error
+            state.pending_error = None
