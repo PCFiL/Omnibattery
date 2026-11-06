@@ -99,5 +99,42 @@ class PhaseDryRunSensor(SensorEntity):
         }
 
 
+class PhaseDryRunMetricSensor(PhaseDryRunSensor):
+    """Graphable numerical readouts from the exact same no-write estimator."""
+
+    _attr_native_unit_of_measurement = "W"
+
+    def __init__(self, hass, entry, phase, coordinators, metric):
+        self.metric = metric
+        super().__init__(hass, entry, phase, coordinators)
+        self._attr_unique_id = f"omni_phase_dry_run_{entry.entry_id}_{phase}_{metric}"
+        self._attr_name = f"PD {phase} dry run {metric.replace('_', ' ')}"
+
+    @property
+    def native_value(self):
+        if self.metric == "grid_power":
+            return self._result.grid_w
+        if self.metric == "error":
+            return self._result.error_w
+        return self._result.proposed_delta_w
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "phase": self.phase,
+            "battery": self._battery_name,
+            "grid_sensor": self._sensor_id,
+            "command_sent": False,
+            "dry_run_status": self._result.status,
+        }
+
+
 def create_phase_diagnostic_entities(hass, entry, coordinators):
-    return [PhaseDryRunSensor(hass, entry, phase, coordinators) for phase in PHASES]
+    entities = []
+    for phase in PHASES:
+        entities.append(PhaseDryRunSensor(hass, entry, phase, coordinators))
+        for metric in ("grid_power", "error", "proposed_delta"):
+            entities.append(PhaseDryRunMetricSensor(
+                hass, entry, phase, coordinators, metric
+            ))
+    return entities
