@@ -141,6 +141,11 @@ async def async_setup_entry(
 
     entities = []
 
+    # Read-only L1/L2/L3 dry-run diagnostics. These never write to batteries
+    # and remain available even when all phase PD switches are disabled.
+    from .phase_diagnostics import create_phase_diagnostic_entities
+    entities.extend(create_phase_diagnostic_entities(hass, entry, coordinators))
+
     # Add individual battery sensors. The driver owns the per-platform split, so
     # use its sensor_definitions directly (same pattern as number.py). The old
     # _all_definitions filter required a "register" field, which silently dropped
