@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/publish-phase-dashboard.yml
       - scripts/apply_phase_pd_dashboard.py
+      - scripts/fix_phase_pd_dashboard_toggle.py
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,9 @@ jobs:
         with:
           node-version: "22"
       - name: Apply strict frontend patch
-        run: python scripts/apply_phase_pd_dashboard.py
+        run: |
+          python scripts/apply_phase_pd_dashboard.py
+          python scripts/fix_phase_pd_dashboard_toggle.py
       - name: Check dashboard JavaScript
         run: node --check custom_components/omnibattery/frontend/marstek-panel.js
       - name: Commit updated dashboard
