@@ -12,17 +12,6 @@ from typing import Any
 
 from .phase_meter import PhaseMeterReading, read_phase_power
 
-MQTT_PRIMARY = {
-    "L1": "sensor.shelly_puissance_l1",
-    "L2": "sensor.shelly_puissance_l2",
-    "L3": "sensor.shelly_puissance_l3",
-}
-NATIVE_FALLBACK = {
-    "L1": "sensor.shellypro3em_841fe8904c10_phase_a_puissance",
-    "L2": "sensor.shellypro3em_841fe8904c10_phase_b_puissance",
-    "L3": "sensor.shellypro3em_841fe8904c10_phase_c_puissance",
-}
-
 
 @dataclass(frozen=True)
 class SelectedPhaseMeter:
@@ -44,14 +33,10 @@ def select_phase_meter(
 ) -> SelectedPhaseMeter:
     """Prefer valid primary, else a valid fallback, else fail closed.
 
-    A fallback is automatically available ONLY for the exact known MQTT
-    entity of this physical phase. An explicit fallback may instead be set
-    by configuration. Never reuse L1 readings for L2 or L3.
+    Only the explicitly configured secondary source may be used.\n    Never invent or infer a fallback sensor from primary name.
     """
-    if phase not in MQTT_PRIMARY:
+    if phase not in ("L1", "L2", "L3"):
         raise ValueError("Unknown phase")
-    if fallback_entity_id is None and primary_entity_id == MQTT_PRIMARY[phase]:
-        fallback_entity_id = NATIVE_FALLBACK[phase]
     if fallback_entity_id == primary_entity_id:
         fallback_entity_id = None
     primary = read_phase_power(
