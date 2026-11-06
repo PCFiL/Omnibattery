@@ -15,6 +15,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install pytest
-        run: python -m pip install pytest
+        run: python -m pip install pytest pytest-asyncio
       - name: Run isolated phase unit tests
         run: python scripts/test_phase_isolated.py
