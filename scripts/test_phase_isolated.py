@@ -31,5 +31,8 @@ raise SystemExit(pytest.main([
         "test_phase_meter.py",
         "test_phase_dispatch_safety.py",
         "test_command_ownership.py",
+        "test_phase_pd_derivative.py",
+        "test_phase_runtime.py",
+        "test_phase_write_lock.py",
     )),
 ]))
