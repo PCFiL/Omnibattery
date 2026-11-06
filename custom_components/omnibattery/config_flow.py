@@ -3849,7 +3849,14 @@ class OptionsFlowHandler(OptionsFlow):
                 mode=NumberSelectorMode.BOX,
             ))
 
-        sensor_default = current.get("grid_sensor")
+        # A legacy/manual value without the sensor.* domain makes HA's
+        # entity selector display "Unknown selected entity". Offer the
+        # canonical ID only when that entity actually exists.
+        sensor_default = current.get("grid_sensor") or ""
+        if sensor_default and not sensor_default.startswith("sensor."):
+            sensor_default = "sensor." + sensor_default
+        if sensor_default and self.hass.states.get(sensor_default) is None:
+            sensor_default = ""
         sensor_key = (
             vol.Required("grid_sensor", default=sensor_default)
             if sensor_default else vol.Required("grid_sensor")
