@@ -29,7 +29,7 @@ class FakeController:
     def get_charge_blockers(self, c): return {}
     def get_discharge_blockers(self, c): return {}
 
-    async def _set_battery_power(self, c, charge, discharge, *, owner):
+    async def _set_battery_power(self, c, charge, discharge, *, owner, force_write=False):
         self.writes.append((c.name, charge, discharge, owner))
         return True
 
