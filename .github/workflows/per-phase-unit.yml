@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/per-battery-phase-pd-control
+      - main
   pull_request:
 
 jobs:
