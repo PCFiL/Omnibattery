@@ -80,3 +80,29 @@ def test_three_distinct_phase_assignments_pass():
         for phase, battery in zip(("L1", "L2", "L3"), BATTERIES)
     ]
     assert len(validate_phase_group(channels)) == 3
+
+
+def test_secondary_sensor_is_saved_per_phase():
+    settings = data()
+    settings["fallback_grid_sensor"] = "sensor.native_l1"
+    channel = build_phase_channel(ENTRY, "L1", settings, BATTERIES)
+    assert channel["grid_sensor"] == "sensor.shelly_l1"
+    assert channel["fallback_grid_sensor"] == "sensor.native_l1"
+    assert channel["enabled"] is False
+
+
+def test_same_primary_and_secondary_rejected():
+    settings = data()
+    settings["fallback_grid_sensor"] = settings["grid_sensor"]
+    with pytest.raises(ValueError, match="fallback_same_as_primary"):
+        build_phase_channel(ENTRY, "L1", settings, BATTERIES)
+
+
+def test_cross_phase_sensor_reuse_rejected():
+    first_settings = data(BATTERIES[0], "sensor.mqtt_l1")
+    first_settings["fallback_grid_sensor"] = "sensor.native_l1"
+    second_settings = data(BATTERIES[1], "sensor.native_l1")
+    first = build_phase_channel(ENTRY, "L1", first_settings, BATTERIES)
+    second = build_phase_channel(ENTRY, "L2", second_settings, BATTERIES)
+    with pytest.raises(ValueError, match="sensor_reused_across_phases"):
+        validate_phase_group([first, second])
