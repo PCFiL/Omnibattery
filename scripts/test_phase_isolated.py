@@ -29,6 +29,7 @@ raise SystemExit(pytest.main([
         "test_per_phase_pd.py",
         "test_phase_channels.py",
         "test_phase_meter.py",
+        "test_phase_meter_fallback.py",
         "test_phase_dispatch_safety.py",
         "test_command_ownership.py",
         "test_phase_pd_derivative.py",
