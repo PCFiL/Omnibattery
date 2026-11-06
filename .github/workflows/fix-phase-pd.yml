@@ -1,0 +1,45 @@
+name: Fix per-phase PD options UI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-phase-pd.yml
+      - scripts/fix_phase_pd_steps.py
+      - scripts/fix_phase_pd_step_labels.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-wizard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Separate PD wizard steps
+        run: python scripts/fix_phase_pd_steps.py
+      - name: Give each phase separate labels
+        run: python scripts/fix_phase_pd_step_labels.py
+      - name: Verify config flow syntax and translation files
+        run: |
+          python -m py_compile custom_components/omnibattery/config_flow.py
+          python -m json.tool custom_components/omnibattery/strings.json > /dev/null
+          python -m json.tool custom_components/omnibattery/translations/fr.json > /dev/null
+          python -m json.tool custom_components/omnibattery/translations/en.json > /dev/null
+      - name: Publish corrected wizard
+        run: |
+          if git diff --quiet -- custom_components/omnibattery/config_flow.py custom_components/omnibattery/strings.json custom_components/omnibattery/translations/fr.json custom_components/omnibattery/translations/en.json; then
+            echo "Nothing to publish"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/omnibattery/config_flow.py custom_components/omnibattery/strings.json custom_components/omnibattery/translations/fr.json custom_components/omnibattery/translations/en.json
+          git commit -m "fix(ui): keep each PD phase battery and grid sensor selection independent"
+          git push origin HEAD:main
