@@ -2,9 +2,11 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from custom_components.omnibattery.control.phase_meter_fallback import (
-    MQTT_PRIMARY, NATIVE_FALLBACK, select_phase_meter,
-)
+from custom_components.omnibattery.control.phase_meter_fallback import select_phase_meter
+
+MQTT_PRIMARY = {p: f"sensor.test_primary_{p.lower()}" for p in ("L1", "L2", "L3")}
+NATIVE_FALLBACK = {p: f"sensor.test_backup_{p.lower()}" for p in ("L1", "L2", "L3")}
+
 
 NOW = datetime(2026, 11, 6, 16, tzinfo=timezone.utc)
 
@@ -28,7 +30,8 @@ class States:
 def sample(phase, primary, fallback):
     return select_phase_meter(
         States({MQTT_PRIMARY[phase]: primary, NATIVE_FALLBACK[phase]: fallback}),
-        phase=phase, primary_entity_id=MQTT_PRIMARY[phase], now=NOW,
+        phase=phase, primary_entity_id=MQTT_PRIMARY[phase],
+        fallback_entity_id=NATIVE_FALLBACK[phase], now=NOW,
     )
 
 
