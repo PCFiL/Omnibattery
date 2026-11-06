@@ -5991,6 +5991,7 @@ class MarstekVenusPanel extends HTMLElement {
     const toggleId = this._phasePdEntity(phase, "switch", "enabled");
     const numberDefs = [
       ["max_step_w", "number", "Max Δ W"],
+      ["min_command_interval_s", "number", "Intervalle min. s"],
       ["target_w", "number", "Cible W"],
       ["deadband_w", "number", "Bande morte W"],
       ["kp", "number", "Kp"],
