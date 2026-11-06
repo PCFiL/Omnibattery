@@ -156,6 +156,10 @@ class PhaseRuntime:
                 # Force a standby command even if the planner *believes* the
                 # last command was zero; retry failures and reassert on a timer.
                 if phase not in self._meter_faulted:
+                    # A new meter fault always demands a fresh real standby
+                    # write, even when startup previously ACKed 0W.
+                    self._stop_confirmed.discard(phase)
+                    self._last_stop_attempt.pop(phase, None)
                     _LOGGER.error(
                         "Phase %s lost all grid power sensors "
                         "(primary=%s, secondary=%s): forcing battery standby",
