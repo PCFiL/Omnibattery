@@ -49,7 +49,16 @@ def configured_channels(entry, coordinators):
 
 
 class PhaseRuntime:
-    """Runs only inside the controller's serialized control cycle."""
+    """Phase dispatcher and fail-safe for loss of both meter sources.
+
+    A successful write means the driver accepted the request, not necessarily
+    that AC power has already reached zero. Driver/poll telemetry must be
+    checked separately before claiming the battery physically stopped.
+    """
+
+    STOP_RETRY_S = 5.0
+    STOP_REASSERT_S = 30.0
+    METER_RECOVERY_S = 10.0
 
     def __init__(self, controller):
         self.controller = controller
@@ -68,6 +77,49 @@ class PhaseRuntime:
         self.active_batteries = frozenset(
             c.battery_key for c in self.channels if c.enabled
         )
+        self._meter_faulted = set()
+        self._stop_confirmed = set()
+        self._last_stop_attempt = {}
+        self._last_stop_ack = {}
+        self._recovery_started = {}
+        self.safety_status = {}
+
+    async def _force_zero(self, channel, battery, *, now):
+        """Demand 0W/0W at the existing guarded, serialized write boundary.
+
+        Never infer an ACK from the planner's last command (it may be zero
+        while the physical battery still has a nonzero setpoint).
+        """
+        phase = channel.phase
+        last_attempt = self._last_stop_attempt.get(phase)
+        interval = (
+            self.STOP_REASSERT_S if phase in self._stop_confirmed
+            else self.STOP_RETRY_S
+        )
+        if last_attempt is not None and now - last_attempt < interval:
+            return phase in self._stop_confirmed
+        self._last_stop_attempt[phase] = now
+        try:
+            ok = await self.controller._set_battery_power(
+                battery, 0, 0, owner=f"phase:{phase}", force_write=True,
+            )
+        except Exception:
+            _LOGGER.exception(
+                "Phase %s: 0W safety command failed unexpectedly", phase
+            )
+            ok = False
+        if ok:
+            self.manager.acknowledge(phase, 0, now=now)
+            self._initialized.add(phase)
+            self._stop_confirmed.add(phase)
+            self._last_stop_ack[phase] = now
+        else:
+            self._stop_confirmed.discard(phase)
+            _LOGGER.error(
+                "Phase %s: FAILED to command charge=0W discharge=0W; "
+                "battery may still be operating, check it immediately", phase
+            )
+        return ok
 
     async def run(self):
         ctl = self.controller
@@ -76,7 +128,11 @@ class PhaseRuntime:
         for channel in self.channels:
             if not channel.enabled:
                 continue
+            phase = channel.phase
             battery = self.by_name[channel.battery_key]
+            now = monotonic()
+            # Respect other owner modes: no unsolicited commands while a
+            # manual operator / backup / manual slot owns the battery.
             if (
                 not battery.is_available
                 or battery.data is None
@@ -85,65 +141,88 @@ class PhaseRuntime:
                 or battery.rs485_user_disabled
                 or ctl._is_manual_slot_owned(battery)
             ):
+                self.safety_status[phase] = "battery_unavailable_or_other_owner"
                 continue
-            # Take ownership from fleet by acknowledging a zero setpoint first.
-            if channel.phase not in self._initialized:
-                ok = await ctl._set_battery_power(
-                    battery, 0, 0, owner=f"phase:{channel.phase}"
-                )
-                if ok:
-                    self.manager.acknowledge(channel.phase, 0, now=monotonic())
-                    self._initialized.add(channel.phase)
-                continue
-            selected_meter = select_phase_meter(
+
+            selected = select_phase_meter(
                 ctl.hass.states,
-                phase=channel.phase,
+                phase=phase,
                 primary_entity_id=channel.grid_sensor,
-                fallback_entity_id=self._fallback_by_phase.get(channel.phase),
+                fallback_entity_id=self._fallback_by_phase.get(phase),
                 max_age_s=15,
             )
-            reading = selected_meter.reading
-            if selected_meter.source == "fallback":
+            if selected.reading.power_w is None:
+                # Both sensors invalid: never plan or write a nonzero command.
+                # Force a standby command even if the planner *believes* the
+                # last command was zero; retry failures and reassert on a timer.
+                if phase not in self._meter_faulted:
+                    _LOGGER.error(
+                        "Phase %s lost all grid power sensors "
+                        "(primary=%s, secondary=%s): forcing battery standby",
+                        phase, selected.primary_reason, selected.fallback_reason,
+                    )
+                self._meter_faulted.add(phase)
+                self._recovery_started.pop(phase, None)
+                await self._force_zero(channel, battery, now=now)
+                self.safety_status[phase] = (
+                    "meter_lost_stopped" if phase in self._stop_confirmed
+                    else "meter_lost_stop_unconfirmed"
+                )
+                continue
+
+            if selected.source == "fallback":
                 _LOGGER.debug(
                     "Phase %s: using fallback sensor %s (primary: %s)",
-                    channel.phase, selected_meter.entity_id,
-                    selected_meter.primary_reason,
+                    phase, selected.entity_id, selected.primary_reason,
                 )
-            # Never continue an old nonzero command on stale telemetry.
-            # This safety zero still passes through the normal write blockers.
-            state = self.manager.planner.states[channel.battery_key]
-            if reading.power_w is None:
-                if state.last_command_w:
-                    ok = await ctl._set_battery_power(
-                        battery, 0, 0, owner=f"phase:{channel.phase}"
-                    )
-                    if ok:
-                        self.manager.acknowledge(
-                            channel.phase, 0, now=monotonic()
-                        )
+
+            if phase in self._meter_faulted:
+                # Do not jump directly from sensor recovery into discharge:
+                # insist on a confirmed standby and 10s continuous freshness.
+                if phase not in self._stop_confirmed:
+                    await self._force_zero(channel, battery, now=now)
+                    self.safety_status[phase] = "meter_recovered_stop_unconfirmed"
+                    continue
+                since = self._recovery_started.setdefault(phase, now)
+                if now - since < self.METER_RECOVERY_S:
+                    self.safety_status[phase] = "meter_recovery_wait"
+                    continue
+                self._meter_faulted.remove(phase)
+                self._recovery_started.pop(phase, None)
+                self._stop_confirmed.discard(phase)
+                self.manager.planner.states[channel.battery_key].previous_error = None
+                _LOGGER.info("Phase %s: meters recovered; standby confirmed", phase)
+
+            if phase not in self._initialized:
+                await self._force_zero(channel, battery, now=now)
+                self.safety_status[phase] = (
+                    "startup_zero_accepted" if phase in self._initialized
+                    else "startup_zero_unconfirmed"
+                )
                 continue
+
             max_charge = max(0, ctl._battery_power_limit(battery, True))
             max_discharge = max(0, ctl._battery_power_limit(battery, False))
-            # Directional operation blockers are enforced before planning as
-            # well as at the final _set_battery_power write boundary.
             if ctl.get_charge_blockers(battery):
                 max_charge = 0
             if ctl.get_discharge_blockers(battery):
                 max_discharge = 0
-            now = monotonic()
-            command = self.manager.plan(
-                channel.phase, reading,
+            proposed = self.manager.plan(
+                phase, selected.reading,
                 max_charge_w=max_charge,
                 max_discharge_w=max_discharge,
                 now=now,
             )
-            if command is None:
+            if proposed is None:
+                self.safety_status[phase] = "normal_no_change"
                 continue
             ok = await ctl._set_battery_power(
-                battery, max(0, command), max(0, -command),
-                owner=f"phase:{channel.phase}",
+                battery, max(0, proposed), max(0, -proposed),
+                owner=f"phase:{phase}",
             )
             if ok:
-                self.manager.acknowledge(channel.phase, command, now=now)
+                self.manager.acknowledge(phase, proposed, now=now)
+                self.safety_status[phase] = "normal_command_accepted"
             else:
-                _LOGGER.debug("Phase %s command was not acknowledged", channel.phase)
+                self.safety_status[phase] = "normal_command_unconfirmed"
+                _LOGGER.warning("Phase %s command was not acknowledged", phase)
