@@ -1392,6 +1392,16 @@
           "min_command_interval_s": "Minimum time between commands (seconds)",
           "kp": "Proportional gain Kp",
           "kd": "Derivative gain Kd"
+        },
+        "data_description": {
+          "battery": "Choose the battery physically connected to this phase. Each battery may only be assigned once.",
+          "grid_sensor": "Select the Shelly Pro 3EM active power sensor for this phase (W or kW). Positive must mean grid import; negative means export.",
+          "target_w": "Desired grid power on this phase. 0 W aims for balance; a small positive value can retain a safety import margin.",
+          "deadband_w": "When the error is within this many watts of the target, no power correction is requested. 50 W is a reasonable starting value.",
+          "max_step_w": "Maximum change in the battery power setpoint in one control cycle. Start with 200 W for cautious testing, then tune as needed.",
+          "min_command_interval_s": "Minimum seconds between acknowledged commands to this battery. Start at 5 seconds or more to protect command transport.",
+          "kp": "Proportional gain: response size to the current power error. Start at 1.0; higher values react faster and may oscillate.",
+          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise."
         }
       }
     },
