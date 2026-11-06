@@ -60,6 +60,11 @@ class PhaseRuntime:
         self.by_name = {c.name: c for c in controller.coordinators}
         self.by_phase = {channel.phase: channel for channel in self.channels}
         self._initialized = set()
+        self._fallback_by_phase = {
+            item["phase"]: item.get("fallback_grid_sensor") or None
+            for item in controller.config_entry.data.get(KEY, [])
+            if isinstance(item, dict) and item.get("phase") in ("L1", "L2", "L3")
+        }
         self.active_batteries = frozenset(
             c.battery_key for c in self.channels if c.enabled
         )
@@ -94,6 +99,7 @@ class PhaseRuntime:
                 ctl.hass.states,
                 phase=channel.phase,
                 primary_entity_id=channel.grid_sensor,
+                fallback_entity_id=self._fallback_by_phase.get(channel.phase),
                 max_age_s=15,
             )
             reading = selected_meter.reading
