@@ -1,0 +1,45 @@
+name: Publish configurable phase backup meter
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-phase-backup-ui.yml
+      - scripts/add_configurable_phase_fallback.py
+      - scripts/add_configurable_phase_fallback_labels.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply UI form changes
+        run: python scripts/add_configurable_phase_fallback.py
+      - name: Add translated labels and help
+        run: python scripts/add_configurable_phase_fallback_labels.py
+      - name: Check syntax and JSON
+        run: |
+          python -m py_compile custom_components/omnibattery/config_flow.py
+          python -m json.tool custom_components/omnibattery/strings.json > /dev/null
+          python -m json.tool custom_components/omnibattery/translations/fr.json > /dev/null
+          python -m json.tool custom_components/omnibattery/translations/en.json > /dev/null
+      - name: Publish changes
+        run: |
+          if git diff --quiet -- custom_components/omnibattery/config_flow.py custom_components/omnibattery/strings.json custom_components/omnibattery/translations/fr.json custom_components/omnibattery/translations/en.json; then
+            echo "No new changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/omnibattery/config_flow.py custom_components/omnibattery/strings.json custom_components/omnibattery/translations/fr.json custom_components/omnibattery/translations/en.json
+          git commit -m "feat(ui): configure primary and optional secondary power sensors per phase"
+          git push origin HEAD:main
