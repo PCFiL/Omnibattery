@@ -17,6 +17,7 @@ from homeassistant.helpers.event import (
 )
 
 from .control.phase_config import PHASES, channel_data
+from .const import DOMAIN
 from .control.phase_dry_run import estimate_phase
 from .control.phase_meter_fallback import select_phase_meter
 
@@ -111,6 +112,19 @@ class PhaseDryRunSensor(SensorEntity):
         self._secondary_id = secondary_id
         self._live_pd_enabled = bool(data.get("enabled", False))
         self._kd = float(data.get("kd", 0))
+        runtime = getattr(
+            (self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("controller")),
+            "_phase_runtime", None,
+        )
+        self._phase_safety_status = (
+            runtime.safety_status.get(self.phase, "inactive")
+            if runtime else "inactive"
+        )
+        battery_data = getattr(battery, "data", None) if battery else None
+        self._battery_power_w = (
+            battery_data.get("battery_power")
+            if isinstance(battery_data, dict) else None
+        )
 
     @property
     def native_value(self):
@@ -141,6 +155,8 @@ class PhaseDryRunSensor(SensorEntity):
             "kd_configured": self._kd,
             "derivative_included": False,
             "command_sent": False,
+            "phase_safety_status": self._phase_safety_status,
+            "battery_measured_power_w": self._battery_power_w,
             "reason": result.reason,
             "note": "Proposed delta is an instantaneous diagnostic, not a battery setpoint; SOC, safety blockers and Kd are not simulated.",
         }
