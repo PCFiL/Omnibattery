@@ -1,0 +1,41 @@
+name: Publish per-phase PD dashboard controls
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-phase-dashboard.yml
+      - scripts/apply_phase_pd_dashboard.py
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Apply strict frontend patch
+        run: python scripts/apply_phase_pd_dashboard.py
+      - name: Check dashboard JavaScript
+        run: node --check custom_components/omnibattery/frontend/marstek-panel.js
+      - name: Commit updated dashboard
+        run: |
+          if git diff --quiet -- custom_components/omnibattery/frontend/marstek-panel.js; then
+            echo "Dashboard already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/omnibattery/frontend/marstek-panel.js
+          git commit -m "feat(ui): add per-battery PD phase switch and tuning in dashboard"
+          git push origin HEAD:main
