@@ -28,7 +28,9 @@ def configured_channels(entry, coordinators):
     for item in raw:
         if not isinstance(item, dict):
             raise ValueError("Invalid phase channel")
-        name = item["battery"]
+        name = item.get("battery", "")
+        if not item.get("enabled", False):
+            continue
         if name not in names:
             raise ValueError(f"Unknown battery: {name}")
         channels.append(PhaseChannel(
@@ -40,6 +42,8 @@ def configured_channels(entry, coordinators):
             deadband_w=float(item.get("deadband_w", 50)),
             min_command_interval_s=float(item.get("min_command_interval_s", 5)),
             max_step_w=float(item.get("max_step_w", 800)),
+            kp=float(item.get("kp", 1)),
+            kd=float(item.get("kd", 0)),
         ))
     return tuple(channels)
 
@@ -55,6 +59,7 @@ class PhaseRuntime:
         self.manager = PhaseChannelManager(self.channels)
         self.by_name = {c.name: c for c in controller.coordinators}
         self.by_phase = {channel.phase: channel for channel in self.channels}
+        self._initialized = set()
         self.active_batteries = frozenset(
             c.battery_key for c in self.channels if c.enabled
         )
@@ -75,6 +80,15 @@ class PhaseRuntime:
                 or battery.rs485_user_disabled
                 or ctl._is_manual_slot_owned(battery)
             ):
+                continue
+            # Take ownership from fleet by acknowledging a zero setpoint first.
+            if channel.phase not in self._initialized:
+                ok = await ctl._set_battery_power(
+                    battery, 0, 0, owner=f"phase:{channel.phase}"
+                )
+                if ok:
+                    self.manager.acknowledge(channel.phase, 0, now=monotonic())
+                    self._initialized.add(channel.phase)
                 continue
             reading = read_phase_power(
                 ctl.hass.states.get(channel.grid_sensor),
