@@ -32,8 +32,16 @@ def build_phase_channel(entry, phase, user_input, battery_names):
         raise ValueError("invalid_battery")
     if not isinstance(sensor, str) or not sensor.startswith("sensor."):
         raise ValueError("invalid_sensor")
+    secondary = user_input.get("fallback_grid_sensor") or ""
+    if secondary and (not isinstance(secondary, str) or not secondary.startswith("sensor.")):
+        raise ValueError("invalid_fallback_sensor")
+    if secondary and secondary == sensor:
+        raise ValueError("fallback_same_as_primary")
     result = dict(previous)
-    result.update({"phase": phase, "battery": battery, "grid_sensor": sensor, "enabled": False})
+    result.update({
+        "phase": phase, "battery": battery, "grid_sensor": sensor,
+        "fallback_grid_sensor": secondary, "enabled": False,
+    })
     for key, (minimum, maximum) in NUMERIC_BOUNDS.items():
         raw = user_input.get(key, previous.get(key, 5 if key == "min_command_interval_s" else 0))
         try:
@@ -51,7 +59,14 @@ def validate_phase_group(channels):
     if len(channels) > 3:
         raise ValueError("too_many_phases")
     for key in ("phase", "battery", "grid_sensor"):
+
         values = [c[key] for c in channels]
         if len(values) != len(set(values)):
             raise ValueError("duplicate_" + key)
+    fallback_ids = [c.get("fallback_grid_sensor") for c in channels if c.get("fallback_grid_sensor")]
+    if len(fallback_ids) != len(set(fallback_ids)):
+        raise ValueError("duplicate_fallback_sensor")
+    all_ids = [c["grid_sensor"] for c in channels] + fallback_ids
+    if len(all_ids) != len(set(all_ids)):
+        raise ValueError("sensor_reused_across_phases")
     return channels
