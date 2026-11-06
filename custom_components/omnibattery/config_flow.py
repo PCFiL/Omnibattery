@@ -3841,6 +3841,15 @@ class OptionsFlowHandler(OptionsFlow):
                 errors["grid_sensor"] = "phase_pd_sensor_missing"
             elif sensor_state.attributes.get("unit_of_measurement") not in ("W", "kW"):
                 errors["grid_sensor"] = "phase_pd_sensor_unit"
+            fallback_id = user_input.get("fallback_grid_sensor") or ""
+            if fallback_id:
+                fallback_state = self.hass.states.get(fallback_id)
+                if fallback_id == sensor_name:
+                    errors["fallback_grid_sensor"] = "fallback_same_as_primary"
+                elif fallback_state is None:
+                    errors["fallback_grid_sensor"] = "phase_pd_sensor_missing"
+                elif fallback_state.attributes.get("unit_of_measurement") not in ("W", "kW"):
+                    errors["fallback_grid_sensor"] = "phase_pd_sensor_unit"
             if not errors:
                 try:
                     validated = build_phase_channel(
@@ -3885,6 +3894,14 @@ class OptionsFlowHandler(OptionsFlow):
                         mode=SelectSelectorMode.DROPDOWN,
                     )),
                 sensor_key: EntitySelector(EntitySelectorConfig(
+                    domain="sensor", device_class="power",
+                )),
+                vol.Optional(
+                    "fallback_grid_sensor",
+                    description={
+                        "suggested_value": current.get("fallback_grid_sensor")
+                    } if current.get("fallback_grid_sensor") else {},
+                ): EntitySelector(EntitySelectorConfig(
                     domain="sensor", device_class="power",
                 )),
                 vol.Required("target_w", default=current.get("target_w", 0)):

@@ -1427,7 +1427,8 @@
           "max_step_w": "Variation maximale par commande (W)",
           "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
           "kp": "Gain proportionnel Kp",
-          "kd": "Gain dérivé Kd"
+          "kd": "Gain dérivé Kd",
+          "fallback_grid_sensor": "Capteur secondaire de secours (facultatif)"
         },
         "data_description": {
           "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
@@ -1437,7 +1438,8 @@
           "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
           "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
           "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
-          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure.",
+          "fallback_grid_sensor": "Capteur de puissance (W ou kW) utilisé uniquement si le capteur principal est indisponible, invalide ou périmé depuis plus de 15 secondes. Doit mesurer la même phase avec le même signe : positif = importation."
         }
       },
       "phase_pd_l2": {
@@ -1451,7 +1453,8 @@
           "max_step_w": "Variation maximale par commande (W)",
           "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
           "kp": "Gain proportionnel Kp",
-          "kd": "Gain dérivé Kd"
+          "kd": "Gain dérivé Kd",
+          "fallback_grid_sensor": "Capteur secondaire de secours (facultatif)"
         },
         "data_description": {
           "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
@@ -1461,7 +1464,8 @@
           "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
           "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
           "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
-          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure.",
+          "fallback_grid_sensor": "Capteur de puissance (W ou kW) utilisé uniquement si le capteur principal est indisponible, invalide ou périmé depuis plus de 15 secondes. Doit mesurer la même phase avec le même signe : positif = importation."
         }
       },
       "phase_pd_l3": {
@@ -1475,7 +1479,8 @@
           "max_step_w": "Variation maximale par commande (W)",
           "min_command_interval_s": "Intervalle minimum entre commandes (secondes)",
           "kp": "Gain proportionnel Kp",
-          "kd": "Gain dérivé Kd"
+          "kd": "Gain dérivé Kd",
+          "fallback_grid_sensor": "Capteur secondaire de secours (facultatif)"
         },
         "data_description": {
           "battery": "Choisissez la batterie physiquement raccordée à cette phase. Une batterie ne peut être attribuée qu’à une seule phase.",
@@ -1485,7 +1490,8 @@
           "max_step_w": "Variation maximale de la consigne batterie à chaque cycle. Commencez à 200 W pour les essais, puis ajustez progressivement.",
           "min_command_interval_s": "Délai minimal entre deux commandes confirmées à cette batterie. Commencez avec 5 secondes ou plus.",
           "kp": "Gain proportionnel : intensité de correction selon l’écart de puissance. Commencez à 1,0 ; une valeur trop élevée peut osciller.",
-          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure."
+          "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure.",
+          "fallback_grid_sensor": "Capteur de puissance (W ou kW) utilisé uniquement si le capteur principal est indisponible, invalide ou périmé depuis plus de 15 secondes. Doit mesurer la même phase avec le même signe : positif = importation."
         }
       }
     },
@@ -1534,7 +1540,11 @@
       "duplicate_grid_sensor": "Chaque phase doit avoir son propre capteur de puissance.",
       "duplicate_phase": "Une phase est configurée plusieurs fois.",
       "phase_pd_sensor_missing": "Le capteur sélectionné n'existe pas.",
-      "phase_pd_sensor_unit": "Le capteur sélectionné doit mesurer en W ou kW."
+      "phase_pd_sensor_unit": "Le capteur sélectionné doit mesurer en W ou kW.",
+      "fallback_same_as_primary": "Les capteurs principal et secondaire doivent être différents.",
+      "invalid_fallback_sensor": "Sélectionnez une entité sensor valide.",
+      "duplicate_fallback_sensor": "Un capteur secondaire est affecté plusieurs fois.",
+      "sensor_reused_across_phases": "Un capteur est utilisé sur plusieurs phases."
     },
     "abort": {
       "phase_pd_disable_first": "Désactivez tous les contrôleurs PD de phase avant de modifier les affectations.",

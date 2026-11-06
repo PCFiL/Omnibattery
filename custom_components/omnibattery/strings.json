@@ -1414,7 +1414,8 @@
           "max_step_w": "Maximum change per command (W)",
           "min_command_interval_s": "Minimum time between commands (seconds)",
           "kp": "Proportional gain Kp",
-          "kd": "Derivative gain Kd"
+          "kd": "Derivative gain Kd",
+          "fallback_grid_sensor": "Secondary backup power sensor (optional)"
         },
         "data_description": {
           "battery": "Choose the battery physically connected to this phase. Each battery may only be assigned once.",
@@ -1424,7 +1425,8 @@
           "max_step_w": "Maximum change in the battery power setpoint in one control cycle. Start with 200 W for cautious testing, then tune as needed.",
           "min_command_interval_s": "Minimum seconds between acknowledged commands to this battery. Start at 5 seconds or more to protect command transport.",
           "kp": "Proportional gain: response size to the current power error. Start at 1.0; higher values react faster and may oscillate.",
-          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise."
+          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise.",
+          "fallback_grid_sensor": "Power sensor in W or kW used only if the primary is missing, invalid, or older than 15 seconds. Must measure the same phase with the same sign: positive = grid import."
         }
       },
       "phase_pd_l2": {
@@ -1438,7 +1440,8 @@
           "max_step_w": "Maximum change per command (W)",
           "min_command_interval_s": "Minimum time between commands (seconds)",
           "kp": "Proportional gain Kp",
-          "kd": "Derivative gain Kd"
+          "kd": "Derivative gain Kd",
+          "fallback_grid_sensor": "Secondary backup power sensor (optional)"
         },
         "data_description": {
           "battery": "Choose the battery physically connected to this phase. Each battery may only be assigned once.",
@@ -1448,7 +1451,8 @@
           "max_step_w": "Maximum change in the battery power setpoint in one control cycle. Start with 200 W for cautious testing, then tune as needed.",
           "min_command_interval_s": "Minimum seconds between acknowledged commands to this battery. Start at 5 seconds or more to protect command transport.",
           "kp": "Proportional gain: response size to the current power error. Start at 1.0; higher values react faster and may oscillate.",
-          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise."
+          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise.",
+          "fallback_grid_sensor": "Power sensor in W or kW used only if the primary is missing, invalid, or older than 15 seconds. Must measure the same phase with the same sign: positive = grid import."
         }
       },
       "phase_pd_l3": {
@@ -1462,7 +1466,8 @@
           "max_step_w": "Maximum change per command (W)",
           "min_command_interval_s": "Minimum time between commands (seconds)",
           "kp": "Proportional gain Kp",
-          "kd": "Derivative gain Kd"
+          "kd": "Derivative gain Kd",
+          "fallback_grid_sensor": "Secondary backup power sensor (optional)"
         },
         "data_description": {
           "battery": "Choose the battery physically connected to this phase. Each battery may only be assigned once.",
@@ -1472,7 +1477,8 @@
           "max_step_w": "Maximum change in the battery power setpoint in one control cycle. Start with 200 W for cautious testing, then tune as needed.",
           "min_command_interval_s": "Minimum seconds between acknowledged commands to this battery. Start at 5 seconds or more to protect command transport.",
           "kp": "Proportional gain: response size to the current power error. Start at 1.0; higher values react faster and may oscillate.",
-          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise."
+          "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise.",
+          "fallback_grid_sensor": "Power sensor in W or kW used only if the primary is missing, invalid, or older than 15 seconds. Must measure the same phase with the same sign: positive = grid import."
         }
       }
     },
@@ -1521,7 +1527,11 @@
       "duplicate_grid_sensor": "Each phase requires a separate power sensor.",
       "duplicate_phase": "A phase is configured more than once.",
       "phase_pd_sensor_missing": "The selected power sensor does not exist.",
-      "phase_pd_sensor_unit": "The selected sensor must report W or kW."
+      "phase_pd_sensor_unit": "The selected sensor must report W or kW.",
+      "fallback_same_as_primary": "Primary and secondary sensors must differ.",
+      "invalid_fallback_sensor": "Choose a valid sensor entity.",
+      "duplicate_fallback_sensor": "One backup sensor is assigned multiple times.",
+      "sensor_reused_across_phases": "A power sensor is reused across phases."
     },
     "abort": {
       "phase_pd_disable_first": "Disable all phase PD controllers before changing the mapping.",
