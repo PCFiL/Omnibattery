@@ -54,7 +54,7 @@ class FakeController:
     def get_charge_blockers(self, battery): return {"soc": True} if self.block_charge else {}
     def get_discharge_blockers(self, battery): return {"soc": True} if self.block_discharge else {}
 
-    async def _set_battery_power(self, battery, charge, discharge, *, owner):
+    async def _set_battery_power(self, battery, charge, discharge, *, owner, force_write=False):
         self.writes.append((charge, discharge, owner))
         return self.ack
 
@@ -136,5 +136,6 @@ async def test_failed_ack_keeps_phase_uninitialized():
     ctl.ack = False
     runtime = await initialize(ctl)
     assert not runtime._initialized
+    runtime._last_stop_attempt["L2"] -= 6
     await runtime.run()
     assert [x[0:2] for x in ctl.writes] == [(0, 0), (0, 0)]
