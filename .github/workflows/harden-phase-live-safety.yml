@@ -1,0 +1,32 @@
+name: Harden phase live safety boundary
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/harden-phase-live-safety.yml
+      - scripts/harden_phase_live_safety.py
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Integrate phase current limiter and safety finally
+        run: python scripts/harden_phase_live_safety.py
+      - name: Check Python syntax
+        run: python -m py_compile custom_components/omnibattery/__init__.py custom_components/omnibattery/control/phase_runtime.py custom_components/omnibattery/phase_diagnostics.py
+      - name: Commit safe boundary
+        run: |
+          if git diff --quiet -- custom_components/omnibattery/__init__.py; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/omnibattery/__init__.py
+          git commit -m "safety: enforce current limit on phase PD and run safety stop despite fleet exceptions"
+          git push origin HEAD:main
