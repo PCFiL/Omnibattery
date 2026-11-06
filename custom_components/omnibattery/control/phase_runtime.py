@@ -10,7 +10,7 @@ import logging
 from time import monotonic
 
 from .phase_channels import PhaseChannel, PhaseChannelManager
-from .phase_meter import read_phase_power
+from .phase_meter_fallback import select_phase_meter
 
 _LOGGER = logging.getLogger(__name__)
 KEY = "phase_pd_channels"
@@ -90,10 +90,19 @@ class PhaseRuntime:
                     self.manager.acknowledge(channel.phase, 0, now=monotonic())
                     self._initialized.add(channel.phase)
                 continue
-            reading = read_phase_power(
-                ctl.hass.states.get(channel.grid_sensor),
+            selected_meter = select_phase_meter(
+                ctl.hass.states,
+                phase=channel.phase,
+                primary_entity_id=channel.grid_sensor,
                 max_age_s=15,
             )
+            reading = selected_meter.reading
+            if selected_meter.source == "fallback":
+                _LOGGER.debug(
+                    "Phase %s: using fallback sensor %s (primary: %s)",
+                    channel.phase, selected_meter.entity_id,
+                    selected_meter.primary_reason,
+                )
             # Never continue an old nonzero command on stale telemetry.
             # This safety zero still passes through the normal write blockers.
             state = self.manager.planner.states[channel.battery_key]
