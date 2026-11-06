@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -70,6 +71,8 @@ async def async_setup_entry(
     coordinators: list[MarstekVenusDataUpdateCoordinator] = hass.data[DOMAIN][entry.entry_id]["coordinators"]
     controller = hass.data[DOMAIN][entry.entry_id].get("controller")
     entities = []
+    for phase in ("L1", "L2", "L3"):
+        entities.append(PhasePdEnableSwitch(hass, entry, phase))
 
     # Add regular battery switches
     for coordinator in coordinators:
@@ -2318,3 +2321,40 @@ class NegativePriceChargingSwitch(SwitchEntity):
             "manufacturer": "Omnibattery",
             "model": "Multi-Battery System",
         }
+
+
+class PhasePdEnableSwitch(SwitchEntity):
+    """Opt-in phase regulation; changes reload the config entry."""
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:sine-wave"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass, entry, phase):
+        self.hass, self.entry, self.phase = hass, entry, phase
+        self._attr_unique_id = f"omni_phase_pd_{entry.entry_id}_{phase}_enabled"
+        self._attr_name = f"PD {phase} enabled"
+
+    @property
+    def is_on(self):
+        from .control.phase_config import channel_data
+        return bool(channel_data(self.entry, self.phase).get("enabled"))
+
+    async def async_turn_on(self, **kwargs):
+        from .control.phase_config import update_channel
+        await update_channel(self.hass, self.entry, self.phase, "enabled", True)
+
+    async def async_turn_off(self, **kwargs):
+        from .control.phase_config import update_channel
+        controller = self.hass.data[DOMAIN][self.entry.entry_id].get("controller")
+        if controller is not None and controller._phase_runtime is not None:
+            channel = controller._phase_runtime.by_phase.get(self.phase)
+            if channel is not None and channel.enabled:
+                battery = controller._phase_runtime.by_name[channel.battery_key]
+                async with controller._control_lock:
+                    if not await controller._set_battery_power(
+                        battery, 0, 0, owner=f"phase:{self.phase}"
+                    ):
+                        raise HomeAssistantError(
+                            "Unable to stop battery; phase control remains enabled"
+                        )
+        await update_channel(self.hass, self.entry, self.phase, "enabled", False)
