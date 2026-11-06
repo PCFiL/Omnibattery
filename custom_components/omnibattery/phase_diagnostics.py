@@ -9,12 +9,18 @@ from __future__ import annotations
 from datetime import timedelta
 
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.core import callback
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
 
 from .control.phase_config import PHASES, channel_data
 from .control.phase_dry_run import estimate_phase
-from .control.phase_meter_fallback import select_phase_meter
+from .control.phase_meter_fallback import (
+    MQTT_PRIMARY, NATIVE_FALLBACK, select_phase_meter,
+)
 
 
 class PhaseDryRunSensor(SensorEntity):
@@ -37,11 +43,35 @@ class PhaseDryRunSensor(SensorEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+        # Both listeners use @callback: HA otherwise runs plain methods in
+        # an executor, where async_write_ha_state() is not thread-safe.
+        # Listen to primary/fallback sensor changes for immediate updates;
+        # keep the timer to detect stale sensors even with no state changes.
+        configured = channel_data(self.entry, self.phase).get("grid_sensor")
+        observed = {configured} if configured else set()
+        if configured == MQTT_PRIMARY[self.phase]:
+            observed.add(NATIVE_FALLBACK[self.phase])
+        observed.discard(None)
+        if observed:
+            self.async_on_remove(async_track_state_change_event(
+                self.hass, sorted(observed), self._on_meter_changed
+            ))
         self.async_on_remove(async_track_time_interval(
             self.hass, self._update, timedelta(seconds=5)
         ))
+        # Re-read once after HA has attached this entity to its platform.
+        self._refresh()
 
+    @callback
+    def _on_meter_changed(self, _event):
+        self._refresh()
+
+    @callback
     def _update(self, _now):
+        self._refresh()
+
+    @callback
+    def _refresh(self):
         self._read()
         self.async_write_ha_state()
 
