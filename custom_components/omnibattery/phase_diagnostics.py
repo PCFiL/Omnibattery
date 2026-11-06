@@ -14,7 +14,7 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .control.phase_config import PHASES, channel_data
 from .control.phase_dry_run import estimate_phase
-from .control.phase_meter import read_phase_power
+from .control.phase_meter_fallback import select_phase_meter
 
 
 class PhaseDryRunSensor(SensorEntity):
@@ -50,10 +50,15 @@ class PhaseDryRunSensor(SensorEntity):
         battery_name = data.get("battery") or ""
         sensor_id = data.get("grid_sensor") or ""
         configured = bool(battery_name and sensor_id.startswith("sensor."))
-        reading = (
-            read_phase_power(self.hass.states.get(sensor_id), max_age_s=15)
-            if configured else None
+        selected = (
+            select_phase_meter(
+                self.hass.states,
+                phase=self.phase,
+                primary_entity_id=sensor_id,
+                max_age_s=15,
+            ) if configured else None
         )
+        reading = selected.reading if selected else None
         battery = self._battery_by_name.get(battery_name)
         self._result = estimate_phase(
             configured=configured,
@@ -65,6 +70,10 @@ class PhaseDryRunSensor(SensorEntity):
             battery_available=bool(battery and battery.is_available),
         )
         self._reading_reason = reading.reason if reading else "not_configured"
+        self._meter_source = selected.source if selected else "unavailable"
+        self._active_sensor_id = selected.entity_id if selected else None
+        self._primary_reason = selected.primary_reason if selected else None
+        self._fallback_reason = selected.fallback_reason if selected else None
         self._battery_name = battery_name
         self._sensor_id = sensor_id
         self._live_pd_enabled = bool(data.get("enabled", False))
@@ -81,6 +90,10 @@ class PhaseDryRunSensor(SensorEntity):
             "phase": self.phase,
             "battery": self._battery_name,
             "grid_sensor": self._sensor_id,
+            "active_grid_sensor": self._active_sensor_id,
+            "meter_source": self._meter_source,
+            "primary_meter_error": self._primary_reason,
+            "fallback_meter_error": self._fallback_reason,
             "grid_power_w": result.grid_w,
             "error_w": result.error_w,
             "proposed_delta_w": result.proposed_delta_w,
@@ -124,6 +137,8 @@ class PhaseDryRunMetricSensor(PhaseDryRunSensor):
             "phase": self.phase,
             "battery": self._battery_name,
             "grid_sensor": self._sensor_id,
+            "active_grid_sensor": self._active_sensor_id,
+            "meter_source": self._meter_source,
             "command_sent": False,
             "dry_run_status": self._result.status,
         }
