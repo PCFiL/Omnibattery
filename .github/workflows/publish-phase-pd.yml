@@ -7,6 +7,8 @@ on:
     paths:
       - .github/workflows/publish-phase-pd.yml
       - scripts/apply_phase_pd_controller.py
+      - scripts/apply_phase_pd_options_flow.py
+      - scripts/apply_phase_pd_translations.py
   workflow_dispatch:
 
 permissions:
@@ -23,21 +25,24 @@ jobs:
         with:
           python-version: "3.12"
       - name: Apply strict controller integration
-        run: python scripts/apply_phase_pd_controller.py
+        run: |
+          python scripts/apply_phase_pd_controller.py
+          python scripts/apply_phase_pd_options_flow.py
+          python scripts/apply_phase_pd_translations.py
       - name: Validate Python source
-        run: python -m py_compile custom_components/omnibattery/__init__.py custom_components/omnibattery/control/phase_runtime.py custom_components/omnibattery/control/phase_config.py custom_components/omnibattery/number.py custom_components/omnibattery/switch.py custom_components/omnibattery/text.py
+        run: python -m py_compile custom_components/omnibattery/__init__.py custom_components/omnibattery/config_flow.py custom_components/omnibattery/control/phase_options.py custom_components/omnibattery/control/phase_runtime.py custom_components/omnibattery/control/phase_config.py custom_components/omnibattery/number.py custom_components/omnibattery/switch.py custom_components/omnibattery/text.py
       - name: Execute isolated phase unit tests
         run: |
           python -m pip install pytest pytest-asyncio
           python scripts/test_phase_isolated.py
       - name: Commit tested controller integration
         run: |
-          if git diff --quiet -- custom_components/omnibattery/__init__.py; then
+          if git diff --quiet -- custom_components/omnibattery/__init__.py custom_components/omnibattery/config_flow.py custom_components/omnibattery/translations/en.json custom_components/omnibattery/translations/fr.json; then
             echo "No new controller changes"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add custom_components/omnibattery/__init__.py
-          git commit -m "feat: wire exclusive phase PD into controller write path"
+          git add custom_components/omnibattery/__init__.py custom_components/omnibattery/config_flow.py custom_components/omnibattery/translations/en.json custom_components/omnibattery/translations/fr.json
+          git commit -m "feat: provide graphical L1 L2 L3 PD options configuration"
           git push origin HEAD:release/phase-pd-test
