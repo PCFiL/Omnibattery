@@ -6027,7 +6027,7 @@ class MarstekVenusPanel extends HTMLElement {
         button.className = "ctl-toggle phase-pd-toggle";
         button.innerHTML = '<span class="ctl-knob"></span>';
         button.addEventListener("click", () => {
-          const on = hass.states[toggleId]?.state === "on";
+          const on = this._hass.states[toggleId]?.state === "on";
           if (!on && !window.confirm(
             `Activer le pilotage réel PD ${phase} ? Vérifier le SOC, les limites et les protections. ` +
             "Ne pas activer avant la validation de sécurité du contrôleur."
