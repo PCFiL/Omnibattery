@@ -85,6 +85,15 @@ async def async_setup_entry(
     """Set up the number platform."""
     coordinators: list[MarstekVenusDataUpdateCoordinator] = hass.data[DOMAIN][entry.entry_id]["coordinators"]
     entities = []
+    for phase in ("L1", "L2", "L3"):
+        for field, lo, hi in (
+            ("target_w", -500, 500),
+            ("deadband_w", 0, 500),
+            ("max_step_w", 0, 1000),
+            ("kp", 0, 3),
+            ("kd", 0, 30),
+        ):
+            entities.append(PhasePdNumber(hass, entry, phase, field, lo, hi))
 
     # Add Modbus register numbers (per battery)
     for coordinator in coordinators:
@@ -1276,3 +1285,30 @@ class MarstekChargeHysteresisNumber(CoordinatorEntity, NumberEntity):
     def device_info(self):
         """Return device information."""
         return self.coordinator.battery_device_info
+
+
+class PhasePdNumber(NumberEntity):
+    """Per-phase target, deadband, gains and command step."""
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_mode = NumberMode.BOX
+    _attr_native_step = 0.1
+
+    def __init__(self, hass, entry, phase, field, minimum, maximum):
+        self.hass, self.entry, self.phase, self.field = hass, entry, phase, field
+        self._attr_unique_id = f"omni_phase_pd_{entry.entry_id}_{phase}_{field}"
+        self._attr_name = f"PD {phase} {field.replace('_', ' ')}"
+        self._attr_native_min_value = minimum
+        self._attr_native_max_value = maximum
+        if field not in ("kp", "kd"):
+            self._attr_native_unit_of_measurement = "W"
+            self._attr_native_step = 5
+
+    @property
+    def native_value(self):
+        from .control.phase_config import channel_data
+        return channel_data(self.entry, self.phase)[self.field]
+
+    async def async_set_native_value(self, value):
+        from .control.phase_config import update_channel
+        await update_channel(self.hass, self.entry, self.phase, self.field, value)
