@@ -7,6 +7,7 @@ on:
       - .github/workflows/publish-phase-dashboard.yml
       - scripts/apply_phase_pd_dashboard.py
       - scripts/fix_phase_pd_dashboard_toggle.py
+      - scripts/add_phase_pd_dashboard_interval.py
   workflow_dispatch:
 
 permissions:
@@ -29,6 +30,7 @@ jobs:
         run: |
           python scripts/apply_phase_pd_dashboard.py
           python scripts/fix_phase_pd_dashboard_toggle.py
+          python scripts/add_phase_pd_dashboard_interval.py
       - name: Check dashboard JavaScript
         run: node --check custom_components/omnibattery/frontend/marstek-panel.js
       - name: Commit updated dashboard
