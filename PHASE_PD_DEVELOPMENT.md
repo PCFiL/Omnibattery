@@ -83,3 +83,39 @@ Les pourcentages représentent la proportion **d'échantillons**, non une durée
 exacte pondérée. Les statistiques ne garantissent pas qu'une consigne soit
 physiquement délivrée et sont effacées au rechargement de l'intégration.
 Cette instrumentation est en lecture seule et ne change pas les commandes PD.
+
+
+## Fenêtre horaire de charge complète hebdomadaire
+
+La fonction existante relève exceptionnellement la cible de SOC maximal à
+100 % un jour de la semaine. **Elle ne force pas, à elle seule, une charge
+depuis le réseau** : les conditions normales de charge, le délai solaire,
+les protections et les limites matérielles restent prioritaires.
+
+Deux entités `time` sont désormais proposées dans Omnibattery → Contrôle →
+Charge complète hebdomadaire :
+
+* `time.omnibattery_weekly_full_charge_start` : début du créneau ;
+* `time.omnibattery_weekly_full_charge_end` : fin du créneau.
+
+Les paramètres de stockage sont `weekly_full_charge_start` et
+`weekly_full_charge_end` au format `HH:MM`. Les installations existantes
+conservent les valeurs implicites `00:00` et `23:59`, équivalentes à la
+journée entière sélectionnée. L'heure de fin est inclusive à la minute ;
+par exemple `10:00–16:00` autorise l'objectif SOC 100 % de 10:00 à
+16:00:59 inclus, puis l'interrompt dès 16:01.
+
+Les créneaux doivent appartenir au même jour : début strictement
+antérieur à fin. Pour une plage traversant minuit, utiliser une autre
+planification ; la fenêtre hebdomadaire ne permet pas de débordement
+vers le jour suivant.
+
+À l'expiration de la fenêtre, l'objectif exceptionnel de 100 % cesse,
+et le gestionnaire restaure les consignes SOC maximales normales des
+batteries lorsque leur matériel utilise des seuils programmables.
+Une interruption, un redémarrage et un échec de restauration doivent
+être validés dans Home Assistant avant de considérer ce créneau
+comme une garantie d'arrêt matériel de charge.
+
+Le bouton manuel de charge complète conserve sa possibilité d'outrepasser
+la date et la fenêtre, comme il outrepassait déjà le jour.
