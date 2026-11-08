@@ -1486,7 +1486,8 @@
         "title": "EDF Tempo — pre-red charging",
         "description": "Charge to 100% in off-peak hours before red days, including consecutive red days. Requires EDF Tempo, RTE, predictive charging and phase safety. Disabled by default.",
         "data": {
-          "tempo_grid_charge_enabled": "Enable automatic Tempo grid charging"
+          "tempo_grid_charge_enabled": "Enable automatic Tempo grid charging",
+          "tempo_phase_import_limit_w": "Per-phase grid import limit for Tempo charging (W)"
         }
       }
     },
