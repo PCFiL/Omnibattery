@@ -23,7 +23,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from .weekly_charge_window import (
     CONF_WEEKLY_START, CONF_WEEKLY_END, DEFAULT_WEEKLY_START,
-    DEFAULT_WEEKLY_END, in_window,
+    DEFAULT_WEEKLY_END, in_window, active_cycle_date,
 )
 
 from .pack_soc import control_vmax, soc_vs_ceiling
@@ -294,71 +294,48 @@ class WeeklyFullChargeManager:
         current_weekday = now.weekday()
         target_weekday = WEEKDAY_MAP[ctrl.weekly_full_charge_day]
 
-        # Handle day boundary transitions
-        if ctrl.last_checked_weekday is not None and ctrl.last_checked_weekday != current_weekday:
-            # Day changed - check if we're exiting the target day
-            if ctrl.last_checked_weekday == target_weekday and current_weekday != target_weekday:
-                # Just exited the target day - reset flags for next week
-                _LOGGER.info("Weekly Full Charge: Exited %s, resetting flags for next week",
-                            ctrl.weekly_full_charge_day.upper())
-                if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
-                    # The charge may not have reached its completion condition
-                    # before midnight. Resetting the flags alone would leave a
-                    # Zendure socSet=100 in place until the next weekly run.
-                    ctrl._weekly_charge_needs_restore = True
-                    _LOGGER.info(
-                        "Weekly Full Charge: Mid-charge day rollover detected - hardware restore pending"
-                    )
-                ctrl.weekly_full_charge_complete = False
-                ctrl.weekly_full_charge_registers_written = False
-                ctrl._force_full_charge = False
-                ctrl._weekly_charge_status["state"] = "Idle"
-                ctrl._weekly_charge_status.pop("completion_reason", None)
-                # Save the cleared state asynchronously (don't await to avoid blocking)
-                self._create_background_task(
-                    self.save_state(), "omnibattery_weekly_charge_state_save"
-                )
-
-        ctrl.last_checked_weekday = current_weekday
-
-        # Check if we're on the target day and haven't completed yet
-        is_target_day = current_weekday == target_weekday
-
-        # Force full charge button overrides the day check
-        if ctrl._force_full_charge:
-            if ctrl.weekly_full_charge_complete:
-                return False
-            return True
-
-        if not is_target_day:
-            return False
-
-        # Honor the optional clock window. Values are read live from the
-        # config entry, so changing the time controls requires no restart.
-        # Forced charging (the existing manual button) bypasses this schedule.
+        # The weekday names the START of a cycle, which may continue into
+        # the following morning. Never reset just because midnight passed.
         start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
         end = ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
         try:
-            inside_window = in_window(now, start=start, end=end)
+            active_date = active_cycle_date(
+                now, start=start, end=end, weekday=target_weekday
+            )
         except ValueError:
             _LOGGER.error(
-                "Weekly Full Charge: invalid clock window %r–%r; "
-                "disabling the exceptional 100%% target", start, end
+                "Weekly Full Charge: invalid window %r–%r", start, end
             )
-            inside_window = False
-        if not inside_window:
-            # Expiring a window restores temporary 100% hardware ceilings on
-            # the next handle_registers() call; the software 100% override
-            # stops immediately because is_active() returns False here.
-            if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
-                if not ctrl._weekly_charge_needs_restore:
-                    _LOGGER.info(
-                        "Weekly Full Charge: outside configured window %s–%s, "
-                        "restoring normal maximum SOC", start, end
-                    )
-                ctrl._weekly_charge_needs_restore = True
-                ctrl._weekly_charge_status["state"] = "Outside scheduled hours"
+            active_date = None
+
+        ctrl.last_checked_weekday = current_weekday
+        if ctrl._force_full_charge:
+            return not ctrl.weekly_full_charge_complete
+
+        # Between windows clear stale completion once. In the next session,
+        # mark the actual anchor date to ensure completion survives a reload.
+        last_cycle = getattr(ctrl, "_weekly_active_cycle_date", None)
+        if active_date is None:
+            if last_cycle is not None or ctrl.weekly_full_charge_complete:
+                ctrl._weekly_active_cycle_date = None
+                if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
+                    ctrl._weekly_charge_needs_restore = True
+                ctrl.weekly_full_charge_complete = False
+                ctrl.weekly_full_charge_registers_written = False
+                ctrl._weekly_charge_status["state"] = "Idle"
+                ctrl._weekly_charge_status.pop("completion_reason", None)
+                self._create_background_task(
+                    self.save_state(), "omnibattery_weekly_charge_state_save"
+                )
             return False
+
+        if last_cycle is not None and last_cycle != active_date:
+            if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
+                ctrl._weekly_charge_needs_restore = True
+            ctrl.weekly_full_charge_complete = False
+            ctrl.weekly_full_charge_registers_written = False
+            self._already_complete_logged = False
+        ctrl._weekly_active_cycle_date = active_date
 
         if ctrl.weekly_full_charge_complete:
             if not self._already_complete_logged:
@@ -385,57 +362,38 @@ class WeeklyFullChargeManager:
                 _LOGGER.debug("Weekly Full Charge: No persisted state found")
                 return
 
-            today_iso = date.today().isoformat()
-            stored_date = data.get("date")
-
-            # Only restore state if saved on the same calendar date (prevents last week's
-            # completion from being incorrectly restored on the same weekday next week)
-            if stored_date == today_iso:
-                ctrl.weekly_full_charge_complete = data.get("complete", False)
-                ctrl.weekly_full_charge_registers_written = data.get("registers_written", False)
-                # Restore visible status so the sensor reflects the correct state immediately.
-                # (handle_registers() will also correct it on the next tick, but this avoids
-                # a transient "Idle" flash and is correct for the "Complete" case too.)
-                saved_state = data.get("state")
-                if saved_state:
-                    ctrl._weekly_charge_status["state"] = saved_state
-                # Restore delay state
-                ctrl._charge_delay_unlocked = data.get("delay_unlocked", False)
-                ctrl._solar_t_start = data.get("solar_t_start")
+            now = dt_util.now()
+            start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
+            end = ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
+            cycle = active_cycle_date(
+                now, start=start, end=end,
+                weekday=WEEKDAY_MAP[ctrl.weekly_full_charge_day],
+            )
+            saved_cycle = data.get("cycle_date", data.get("date"))
+            # Sunday 22:30 and Monday 04:00 share the same Sunday cycle date.
+            if cycle is not None and saved_cycle == cycle.isoformat():
+                ctrl._weekly_active_cycle_date = cycle
+                ctrl.weekly_full_charge_complete = bool(data.get("complete", False))
+                ctrl.weekly_full_charge_registers_written = bool(data.get("registers_written", False))
                 ctrl._weekly_charge_needs_restore = bool(data.get("restore_pending", False))
                 self._restore_saved_max_soc(data.get("saved_max_soc"))
                 getattr(self, "_cutoff_applied_names", set()).clear()
-                _LOGGER.info(
-                    "Weekly Full Charge: Restored state - complete=%s, "
-                    "registers_written=%s, delay_unlocked=%s, restore_pending=%s",
-                    ctrl.weekly_full_charge_complete,
-                    ctrl.weekly_full_charge_registers_written,
-                    ctrl._charge_delay_unlocked,
-                    ctrl._weekly_charge_needs_restore,
-                )
+                ctrl._weekly_charge_status["state"] = data.get("state", "Idle")
+                ctrl._charge_delay_unlocked = data.get("delay_unlocked", False)
+                ctrl._solar_t_start = data.get("solar_t_start")
+                _LOGGER.info("Weekly Full Charge: restored active cycle %s", saved_cycle)
             else:
-                # A run may span midnight, or HA may restart the next day. The
-                # normal same-day restoration path cannot run in that case, so
-                # carry the original limits forward and restore them before the
-                # next weekly evaluation.
-                restore_pending = bool(data.get("restore_pending", False))
-                unfinished_run = bool(data.get("registers_written", False)) and not data.get("complete", False)
+                # The last cycle ended while HA was offline: restore interrupted
+                # hardware cutoffs before the next weekly evaluation.
                 self._restore_saved_max_soc(data.get("saved_max_soc"))
-                getattr(self, "_cutoff_applied_names", set()).clear()
-                if restore_pending or unfinished_run:
-                    ctrl.weekly_full_charge_complete = bool(data.get("complete", False))
-                    ctrl.weekly_full_charge_registers_written = False
+                unfinished = bool(data.get("registers_written")) and not data.get("complete")
+                if bool(data.get("restore_pending")) or unfinished:
                     ctrl._weekly_charge_needs_restore = True
-                    ctrl._weekly_charge_status["state"] = (
-                        "Complete" if ctrl.weekly_full_charge_complete else "Idle"
-                    )
+                    ctrl.weekly_full_charge_registers_written = False
                     _LOGGER.info(
-                        "Weekly Full Charge: Stored state from %s needs cutoff restoration before continuing",
-                        stored_date,
+                        "Weekly Full Charge: expired cycle %s; cutoff restoration pending",
+                        saved_cycle,
                     )
-                else:
-                    _LOGGER.debug("Weekly Full Charge: Stored state is from %s, today is %s - ignoring",
-                                  stored_date, today_iso)
 
         except Exception as e:
             _LOGGER.error("Weekly Full Charge: Failed to load persisted state: %s", e)
@@ -455,6 +413,10 @@ class WeeklyFullChargeManager:
                 "restore_pending": bool(getattr(ctrl, "_weekly_charge_needs_restore", False)),
                 "saved_max_soc": dict(getattr(ctrl, "_weekly_charge_saved_max_soc", {})),
                 "date": date.today().isoformat(),
+                "cycle_date": (
+                    ctrl._weekly_active_cycle_date.isoformat()
+                    if getattr(ctrl, "_weekly_active_cycle_date", None) else None
+                ),
                 "timestamp": now.isoformat(),
                 # Delay state (bundled in the same store for legacy reasons)
                 "delay_unlocked": ctrl._charge_delay_unlocked,
