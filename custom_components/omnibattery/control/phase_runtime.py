@@ -84,6 +84,15 @@ class PhaseRuntime:
         self._recovery_started = {}
         self.safety_status = {}
 
+    def _performance(self, phase):
+        """Return optional instrumentation without affecting battery control."""
+        from ..const import DOMAIN
+        data = self.controller.hass.data.get(DOMAIN, {}).get(
+            self.controller.config_entry.entry_id, {}
+        )
+        tracker = data.get("phase_performance")
+        return tracker.phase(phase) if tracker is not None else None
+
     async def _force_zero(self, channel, battery, *, now):
         """Demand 0W/0W at the existing guarded, serialized write boundary.
 
@@ -108,6 +117,9 @@ class PhaseRuntime:
                 "Phase %s: 0W safety command failed unexpectedly", phase
             )
             ok = False
+        perf = self._performance(phase)
+        if perf is not None:
+            perf.command(accepted=ok, standby=True)
         if ok:
             self.manager.acknowledge(phase, 0, now=now)
             self._initialized.add(phase)
@@ -224,6 +236,9 @@ class PhaseRuntime:
                 battery, max(0, proposed), max(0, -proposed),
                 owner=f"phase:{phase}",
             )
+            perf = self._performance(phase)
+            if perf is not None:
+                perf.command(accepted=ok)
             if ok:
                 self.manager.acknowledge(phase, proposed, now=now)
                 if proposed != 0:
