@@ -21,6 +21,7 @@ from .const import DOMAIN
 from .control.phase_dry_run import estimate_phase
 from .control.phase_meter_fallback import select_phase_meter
 from .control.phase_performance import PhasePerformanceTracker
+from .control.phase_eligibility import classify_eligibility, PhaseEligibility
 
 
 class PhaseDryRunSensor(SensorEntity):
@@ -113,6 +114,36 @@ class PhaseDryRunSensor(SensorEntity):
         self._secondary_id = secondary_id
         self._live_pd_enabled = bool(data.get("enabled", False))
         self._kd = float(data.get("kd", 0))
+        controller = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("controller")
+        self._eligibility = PhaseEligibility(False, "pd_disabled")
+        if self._live_pd_enabled:
+            if controller is None or battery is None:
+                self._eligibility = PhaseEligibility(False, "controller_unavailable")
+            else:
+                try:
+                    other_owner = bool(
+                        controller.manual_mode_enabled
+                        or controller._is_battery_manual_owned(battery)
+                        or controller._is_backup_function_active(battery)
+                        or battery.rs485_user_disabled
+                        or controller._is_manual_slot_owned(battery)
+                    )
+                    self._eligibility = classify_eligibility(
+                        enabled=True,
+                        meter_valid=bool(reading and reading.power_w is not None),
+                        battery_available=bool(battery.is_available and battery.data is not None),
+                        other_owner=other_owner,
+                        error_w=self._result.error_w,
+                        deadband_w=float(data.get("deadband_w", 50)),
+                        charge_limit_w=controller._battery_power_limit(battery, True),
+                        discharge_limit_w=controller._battery_power_limit(battery, False),
+                        charge_blockers=controller.get_charge_blockers(battery),
+                        discharge_blockers=controller.get_discharge_blockers(battery),
+                    )
+                except (AttributeError, TypeError, ValueError, KeyError):
+                    # Missing or unsupported telemetry is never counted as an
+                    # opportunity to regulate.
+                    self._eligibility = PhaseEligibility(False, "safety_state_unavailable")
         if type(self) is PhaseDryRunSensor:
             tracker = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("phase_performance")
             if tracker is not None:
@@ -121,11 +152,10 @@ class PhaseDryRunSensor(SensorEntity):
                     source=self._meter_source,
                     deadband_w=float(data.get("deadband_w", 50)),
                     enabled=self._live_pd_enabled,
+                    eligible=self._eligibility.eligible,
+                    block_reason=self._eligibility.reason,
                 )
-        runtime = getattr(
-            (self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("controller")),
-            "_phase_runtime", None,
-        )
+        runtime = getattr(controller, "_phase_runtime", None)
         self._phase_safety_status = (
             runtime.safety_status.get(self.phase, "inactive")
             if runtime else "inactive"
@@ -166,6 +196,8 @@ class PhaseDryRunSensor(SensorEntity):
             "derivative_included": False,
             "command_sent": False,
             "phase_safety_status": self._phase_safety_status,
+            "regulation_eligible": self._eligibility.eligible,
+            "regulation_block_reason": self._eligibility.reason,
             "battery_measured_power_w": self._battery_power_w,
             "reason": result.reason,
             "note": "Proposed delta is an instantaneous diagnostic, not a battery setpoint; SOC, safety blockers and Kd are not simulated.",
@@ -241,7 +273,7 @@ class PhasePerformanceSensor(SensorEntity):
         return {
             "phase": self.phase,
             **stats,
-            "note": "Rolling sample statistics while phase PD is enabled; windows and counters reset on integration reload. Command count means accepted writer requests, not guaranteed AC delivery.",
+            "note": "Raw performance includes all valid samples while phase PD is enabled; eligible-only metrics exclude periods blocked by charge/discharge protection. Metrics are sampled, not time-weighted. Resets on reload.",
         }
 
 
