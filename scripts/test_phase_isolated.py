@@ -38,6 +38,7 @@ raise SystemExit(pytest.main([
         "test_phase_dual_meter_stop.py",
         "test_phase_performance.py",
         "test_phase_eligibility.py",
+        "test_weekly_charge_window.py",
         "test_phase_write_lock.py",
         "test_phase_options.py",
         "test_phase_dry_run.py",
