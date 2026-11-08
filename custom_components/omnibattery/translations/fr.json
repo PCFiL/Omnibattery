@@ -1724,6 +1724,12 @@
     "time": {
       "automation_charging_end_time": {
         "name": "Fin de Charge Externe"
+      },
+      "weekly_full_charge_start": {
+        "name": "Début de la charge complète hebdomadaire"
+      },
+      "weekly_full_charge_end": {
+        "name": "Fin de la charge complète hebdomadaire"
       }
     },
     "sensor": {
