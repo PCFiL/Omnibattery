@@ -3623,14 +3623,25 @@ class ChargeDischargeController:
             now = dt_util.now()
             snapshot = read_tempo_snapshot(self.hass, now)
             self._tempo_plan = plan_tempo(now, snapshot)
+            # Tomorrow may be unknown until its official announcement.
+            # This must NEVER erase protection of an already-known red day.
+            color_conflict_today = snapshot.warning == "today_color_conflict"
+            clock = now.astimezone(dt_util.get_time_zone("Europe/Paris")).hour
+            tonight_confirmed = (
+                snapshot.tomorrow == "rouge"
+                and snapshot.warning != "tomorrow_color_conflict"
+            )
+            current_red_confirmed = (
+                snapshot.today == "rouge" and not color_conflict_today
+            )
             self._tempo_red_peak_active = (
-                self._tempo_plan.is_red_peak and snapshot.warning is None
+                self._tempo_plan.is_red_peak and current_red_confirmed
             )
             self._tempo_charge_active = (
                 bool(self.predictive_charging_enabled)
                 and not self.predictive_charging_overridden
                 and self._tempo_plan.mode == "charge_before_red"
-                and snapshot.warning is None
+                and (tonight_confirmed if clock >= 22 else current_red_confirmed)
             )
         except Exception:
             _LOGGER.exception("Tempo: unable to read validated EDF/RTE data")
