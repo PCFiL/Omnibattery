@@ -1499,7 +1499,8 @@
         "title": "EDF Tempo — charge avant les jours rouges",
         "description": "Activer la recharge à 100 % pendant les heures creuses précédant une journée rouge. Les capteurs EDF Tempo, RTE, la charge prédictive et la régulation des phases doivent être opérationnels. Fonction désactivée par défaut.",
         "data": {
-          "tempo_grid_charge_enabled": "Autoriser la charge réseau automatique Tempo"
+          "tempo_grid_charge_enabled": "Autoriser la charge réseau automatique Tempo",
+          "tempo_phase_import_limit_w": "Limite d'import réseau par phase pendant la charge Tempo (W)"
         }
       }
     },
