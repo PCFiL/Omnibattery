@@ -56,3 +56,30 @@ Le diagnostic `sensor.pd_l1_dry_run` (et L2/L3) expose
 Les deux sources doivent avoir la même convention de signe
 (**positif = importation réseau**) et mesurer le même point électrique.
 C'est indispensable avant toute activation du PD réel.
+
+
+## Performance du PD par phase : réseau brut et régulation autorisée
+
+Les entités `sensor.pd_l1_performance`, `sensor.pd_l2_performance` et
+`sensor.pd_l3_performance` exposent des fenêtres glissantes de 5/15/60 min.
+
+* **Réseau brut** : `rms_error_w`, `mean_abs_error_w`,
+  `within_deadband_pct` ; toutes les mesures valides lorsque le PD est activé,
+  y compris lorsque la batterie ne peut pas agir.
+* **Régulation autorisée** : `eligible_rms_error_w`,
+  `eligible_mean_abs_error_w`, `eligible_within_deadband_pct` ;
+  uniquement les échantillons pour lesquels les protections Omnibattery
+  autorisent une correction dans le sens nécessaire.
+* **Transparence** : `eligible_samples`, `excluded_samples`,
+  `eligible_pct` et `excluded_reasons` montrent les échantillons
+  exclus. Aucun échantillon autorisé donne `null`, pas `0 W`.
+* **Blocage instantané** : `regulation_eligible` et
+  `regulation_block_reason` dans chaque `sensor.pd_lN_dry_run`.
+  Les raisons SOC proviennent des bloqueurs réels du contrôleur.
+* Dans la bande morte, la mesure reste comptée comme admissible : aucune
+  correction n'est nécessaire à cet instant.
+
+Les pourcentages représentent la proportion **d'échantillons**, non une durée
+exacte pondérée. Les statistiques ne garantissent pas qu'une consigne soit
+physiquement délivrée et sont effacées au rechargement de l'intégration.
+Cette instrumentation est en lecture seule et ne change pas les commandes PD.
