@@ -6663,6 +6663,7 @@ class MarstekVenusPanel extends HTMLElement {
     root.className = "ctl-root";
     this._ctlRoot = root; // _applyArrangeMode toggles .arranging here too
     root.appendChild(this._buildArrangeBar(wrap));
+    root.appendChild(this._buildTempoStatusCard());
     root.appendChild(wrap);
     if (hiddenStack.childElementCount) {
       const sec = document.createElement("div");
@@ -6803,8 +6804,69 @@ class MarstekVenusPanel extends HTMLElement {
     if (tools) tools.style.display = on ? "" : "none";
     for (const card of stack.querySelectorAll(".card")) card.draggable = on;
   }
+  // EDF Tempo read-only integration status. Charging commands remain owned by
+  // the existing controller; the card never writes to any battery entity.
+  _buildTempoStatusCard() {
+    const card = document.createElement("section");
+    card.className = "card";
+    card.dataset.tempoCard = "true";
+    card.style.cssText = "margin:12px 0;padding:16px;display:block";
+    const title = document.createElement("h2");
+    title.textContent = "EDF Tempo · Planification";
+    title.style.cssText = "font-size:1.05rem;margin:0 0 12px";
+    card.appendChild(title);
+    const info = document.createElement("div");
+    info.dataset.tempoBody = "true";
+    info.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:.9rem";
+    card.appendChild(info);
+    const foot = document.createElement("div");
+    foot.dataset.tempoFoot = "true";
+    foot.style.cssText = "margin-top:12px;font-size:.8rem;opacity:.78";
+    card.appendChild(foot);
+    this._updateTempoStatusCard(card);
+    return card;
+  }
+
+  _updateTempoStatusCard(card) {
+    if (!card) return;
+    const state = this._hass?.states?.["sensor.omnibattery_edf_tempo"];
+    const a = state?.attributes || {};
+    const mode = state?.state || "unavailable";
+    const entries = [
+      ["Aujourd'hui", a.today_color],
+      ["Demain", a.tomorrow_color],
+      ["Stratégie", mode === "charge_before_red" ? "Charge 100 % avant rouge"
+        : mode === "red_peak_discharge" ? "Protection HP rouges"
+        : mode === "normal" ? "Fonctionnement normal" : "Indisponible"],
+      ["SOC cible", a.target_soc == null ? "—" : a.target_soc + " %"],
+      ["Échéance", a.deadline ? new Date(a.deadline).toLocaleString("fr-FR") : "—"],
+      ["Prix en cours", Number.isFinite(Number(a.price_eur_kwh))
+        && a.price_eur_kwh != null ? Number(a.price_eur_kwh).toFixed(4) + " €/kWh" : "—"],
+    ];
+    const body = card.querySelector('[data-tempo-body="true"]');
+    if (body) {
+      body.replaceChildren();
+      for (const [label, value] of entries) {
+        const item = document.createElement("div");
+        const name = document.createElement("div");
+        name.style.opacity = ".7";
+        name.textContent = label;
+        const val = document.createElement("strong");
+        val.textContent = value == null ? "—" : String(value);
+        item.append(name, val);
+        body.appendChild(item);
+      }
+    }
+    const foot = card.querySelector('[data-tempo-foot="true"]');
+    if (foot) {
+      foot.textContent = (a.warning ? "Alerte : " + a.warning + " · " : "") +
+        "Diagnostic uniquement — commande de charge Tempo non activée";
+    }
+  }
+
   _patchControl() {
     this._patchSysView(SYS_SECTIONS, "_ctlStore", "_ctlSig", "control", () => this._renderControl());
+    this._updateTempoStatusCard(this.shadowRoot?.querySelector('[data-tempo-card="true"]'));
   }
 
   /** Scan section defs against the live registry: which entities exist + a
