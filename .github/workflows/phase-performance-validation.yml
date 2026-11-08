@@ -1,0 +1,35 @@
+name: Phase PD dashboard and telemetry validation
+
+on:
+  push:
+    branches: [main, release/phase-pd-test]
+    paths:
+      - custom_components/omnibattery/control/phase_performance.py
+      - custom_components/omnibattery/control/phase_eligibility.py
+      - custom_components/omnibattery/phase_diagnostics.py
+      - custom_components/omnibattery/frontend/marstek-panel.js
+      - tests/test_phase_performance.py
+      - tests/test_phase_eligibility.py
+      - scripts/test_phase_isolated.py
+      - .github/workflows/phase-performance-validation.yml
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate Python and JavaScript syntax
+        run: |
+          python -m py_compile custom_components/omnibattery/control/phase_performance.py custom_components/omnibattery/control/phase_eligibility.py custom_components/omnibattery/phase_diagnostics.py
+          node --check custom_components/omnibattery/frontend/marstek-panel.js
+      - name: Run isolated phase regression tests
+        run: |
+          python -m pip install pytest pytest-asyncio
+          python scripts/test_phase_isolated.py
