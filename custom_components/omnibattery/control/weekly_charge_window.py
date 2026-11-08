@@ -1,12 +1,12 @@
-"""Local weekly full-charge time window, independent of Home Assistant.
+"""Local weekly full-charge windows, including overnight time ranges.
 
-The selected weekday is handled by WeeklyFullChargeManager. Windows are
-within that day (no overnight spanning); start inclusive and end minute
-inclusive. Existing installations default to the entire selected day.
+Weekday refers to the day on which the scheduled charge STARTS.
+A Sunday 22:30–05:30 window covers Sunday 22:30 through Monday 05:30.
+The end minute is included for backward compatibility.
 """
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 
 CONF_WEEKLY_START = "weekly_full_charge_start"
 CONF_WEEKLY_END = "weekly_full_charge_end"
@@ -29,14 +29,55 @@ def parse_clock(value: str) -> time:
 def validate_window(start: str, end: str) -> None:
     first = parse_clock(start)
     last = parse_clock(end)
-    if first >= last:
-        raise ValueError("Weekly charge start must precede end on selected day")
+    if first == last:
+        raise ValueError("Weekly charge start and end must differ")
 
 
-def in_window(now: datetime, *, start: str, end: str) -> bool:
+def cycle_start_date(now: datetime, *, start: str, end: str, weekday: int):
+    """Find the starting date of this week's or last week's charge session.
+
+    Returns the most recent configured weekday, including while the session
+    extends into the next civil day.
+    """
     validate_window(start, end)
-    minute = now.hour * 60 + now.minute
+    if weekday not in range(7):
+        raise ValueError("weekday must be 0..6")
+    return (now - timedelta(days=(now.weekday() - weekday) % 7)).date()
+
+
+def in_window(now: datetime, *, start: str, end: str,
+              weekday: int | None = None) -> bool:
+    """Whether now falls in the selected weekly charge window.
+
+    If weekday is omitted, retain clock-only checks for older callers.
+    """
+    validate_window(start, end)
+    current = now.hour * 60 + now.minute
     first = parse_clock(start)
     last = parse_clock(end)
-    return (first.hour * 60 + first.minute <= minute <=
-            last.hour * 60 + last.minute)
+    begin = first.hour * 60 + first.minute
+    finish = last.hour * 60 + last.minute
+    if weekday is None:
+        return begin <= current <= finish if begin < finish else (
+            current >= begin or current <= finish
+        )
+    if begin < finish:
+        return now.weekday() == weekday and begin <= current <= finish
+    return (
+        (now.weekday() == weekday and current >= begin)
+        or (now.weekday() == (weekday + 1) % 7 and current <= finish)
+    )
+
+
+def active_cycle_date(now: datetime, *, start: str, end: str, weekday: int):
+    """Start date of the active window, else None."""
+    if not in_window(now, start=start, end=end, weekday=weekday):
+        return None
+    first = parse_clock(start)
+    last = parse_clock(end)
+    current = now.hour * 60 + now.minute
+    first_m = first.hour * 60 + first.minute
+    end_m = last.hour * 60 + last.minute
+    if first_m > end_m and current <= end_m:
+        return (now - timedelta(days=1)).date()
+    return now.date()
