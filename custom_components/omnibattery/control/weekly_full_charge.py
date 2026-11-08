@@ -20,6 +20,11 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
+from .weekly_charge_window import (
+    CONF_WEEKLY_START, CONF_WEEKLY_END, DEFAULT_WEEKLY_START,
+    DEFAULT_WEEKLY_END, in_window,
+)
 
 from .pack_soc import control_vmax, soc_vs_ceiling
 from ..const import (
@@ -285,7 +290,7 @@ class WeeklyFullChargeManager:
         if not ctrl.weekly_full_charge_complete:
             self._already_complete_logged = False
 
-        now = datetime.now()
+        now = dt_util.now()
         current_weekday = now.weekday()
         target_weekday = WEEKDAY_MAP[ctrl.weekly_full_charge_day]
 
@@ -326,6 +331,25 @@ class WeeklyFullChargeManager:
             return True
 
         if not is_target_day:
+            return False
+
+        # Honor the optional clock window. Values are read live from the
+        # config entry, so changing the time controls requires no restart.
+        # Forced charging (the existing manual button) bypasses this schedule.
+        start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
+        end = ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
+        if not in_window(now, start=start, end=end):
+            # Expiring a window restores temporary 100% hardware ceilings on
+            # the next handle_registers() call; the software 100% override
+            # stops immediately because is_active() returns False here.
+            if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
+                if not ctrl._weekly_charge_needs_restore:
+                    _LOGGER.info(
+                        "Weekly Full Charge: outside configured window %s–%s, "
+                        "restoring normal maximum SOC", start, end
+                    )
+                ctrl._weekly_charge_needs_restore = True
+                ctrl._weekly_charge_status["state"] = "Outside scheduled hours"
             return False
 
         if ctrl.weekly_full_charge_complete:
