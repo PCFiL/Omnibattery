@@ -87,6 +87,12 @@ def read_tempo_snapshot(hass: Any, now: datetime) -> TempoSnapshot:
     rte_tomorrow = _state(hass, RTE_TOMORROW_SENSOR)
     rte_today_color = normalize_color(rte_today.state) if rte_today else None
     rte_tomorrow_color = normalize_color(rte_tomorrow.state) if rte_tomorrow else None
+    if local.time() < time(6, 0):
+        # EDF today_color follows the civil date, while RTE current color
+        # belongs to the Tempo day ending at 06:00. Compare EDF today with
+        # RTE's next color during the midnight-06:00 transition instead.
+        rte_today_color = rte_tomorrow_color
+        rte_tomorrow_color = None
     if today and rte_today_color and today != rte_today_color:
         warning = "today_color_conflict"
     if tomorrow and rte_tomorrow_color and tomorrow != rte_tomorrow_color:
@@ -130,9 +136,9 @@ def plan_tempo(now: datetime, snapshot: TempoSnapshot,
         charging = True
         deadline = datetime.combine(local.date(), time(6, 0), PARIS)
 
-    # The current 00:00-06:00 tariff belongs to the PREVIOUS Tempo day.
-    # Its precise color cannot be derived from EDF's today/tomorrow fields
-    # alone, so no price is claimed for this interval without history.
+    # The 00:00-06:00 tariff belongs to the PREVIOUS Tempo day.
+    # Without yesterday's verified color, report no price instead of making
+    # a false assumption that the just-started red day is already billable.
     price_key = None
     if time(6, 0) <= clock < time(22, 0) and today:
         price_key = f"{today}_hp"
@@ -149,10 +155,33 @@ def plan_tempo(now: datetime, snapshot: TempoSnapshot,
                      snapshot.prices.get(price_key), snapshot.warning)
 
 
-def publish_tempo_diagnostics(hass: Any, now: datetime) -> TempoPlan:
+def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) -> TempoPlan:
     """Publish a dashboard-only HA state. Does not change battery outputs."""
     snapshot = read_tempo_snapshot(hass, now)
     plan = plan_tempo(now, snapshot)
+    effective_price = plan.next_price_eur_kwh
+    if now.astimezone(PARIS).time() < time(6, 0):
+        yesterday = _state(
+            hass, "sensor.tarif_edf_tempo_30kva_tarif_tempo_couleur_hier"
+        )
+        yesterday_color = normalize_color(yesterday.state) if yesterday else None
+        effective_price = (
+            snapshot.prices.get(f"{yesterday_color}_hc")
+            if yesterday_color else None
+        )
+    phase_batteries = []
+    runtime = getattr(controller, "_phase_runtime", None)
+    if runtime is not None:
+        for phase, channel in sorted(runtime.by_phase.items()):
+            battery = runtime.by_name.get(channel.battery_key)
+            data = getattr(battery, "data", None) or {}
+            phase_batteries.append({
+                "phase": phase,
+                "name": channel.battery_key,
+                "soc": data.get("battery_soc"),
+                "safety": runtime.safety_status.get(phase),
+            })
+
     hass.states.async_set(
         "sensor.omnibattery_edf_tempo",
         plan.mode,
@@ -164,11 +193,45 @@ def publish_tempo_diagnostics(hass: Any, now: datetime) -> TempoPlan:
             "target_soc": plan.target_soc,
             "deadline": plan.deadline.isoformat() if plan.deadline else None,
             "red_peak": plan.is_red_peak,
-            "price_eur_kwh": plan.next_price_eur_kwh,
+            "price_eur_kwh": effective_price,
             "prices_eur_kwh": snapshot.prices,
             "warning": plan.warning,
             "mode": plan.mode,
-            "control_enabled": False,
+            "control_enabled": bool(getattr(controller, "tempo_grid_charge_enabled", False)),
+            "control_active": bool(getattr(controller, "_tempo_charge_active", False)),
+            "phase_import_limit_w": (controller.config_entry.data.get(
+                "tempo_phase_import_limit_w", 2500
+            ) if controller else None),
+            "phases": phase_batteries,
         },
     )
     return plan
+
+
+def phase_tempo_charge_request(
+    *, grid_power_w: float, previous_command_w: float,
+    battery_max_charge_w: float, phase_import_limit_w: float,
+    grid_remaining_headroom_w: float, max_step_w: float,
+) -> float:
+    """Bound a phase charge setpoint by live phase and global import headroom.
+
+    All watt values are positive for grid import / battery charging. This
+    is a pure planner; hardware limits/communication ownership still live in
+    PhaseRuntime and the controller. An overload may reduce power immediately.
+    """
+    values = (grid_power_w, previous_command_w, battery_max_charge_w,
+              phase_import_limit_w, grid_remaining_headroom_w, max_step_w)
+    if not all(isfinite(float(v)) for v in values):
+        return 0.0
+
+    previous = max(0.0, previous_command_w)
+    maximum = max(0.0, battery_max_charge_w)
+    phase_budget = phase_import_limit_w - grid_power_w
+    global_budget = grid_remaining_headroom_w
+    target = min(maximum, previous + phase_budget, previous + global_budget)
+    target = max(0.0, target)
+
+    if target <= previous:
+        # Load reduction must not be delayed when a phase/grid cap is reached.
+        return target
+    return min(target, previous + max(0.0, max_step_w))

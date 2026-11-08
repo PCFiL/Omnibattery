@@ -6842,7 +6842,16 @@ class MarstekVenusPanel extends HTMLElement {
       ["Échéance", a.deadline ? new Date(a.deadline).toLocaleString("fr-FR") : "—"],
       ["Prix en cours", Number.isFinite(Number(a.price_eur_kwh))
         && a.price_eur_kwh != null ? Number(a.price_eur_kwh).toFixed(4) + " €/kWh" : "—"],
+      ["Commande Tempo", !a.control_enabled ? "Désactivée"
+        : a.control_active ? "Charge réseau autorisée" : "Veille / hors créneau"],
+      ["Plafond import/phase", a.phase_import_limit_w != null
+        ? a.phase_import_limit_w + " W" : "—"],
     ];
+    for (const phase of (Array.isArray(a.phases) ? a.phases : [])) {
+      entries.push([phase.phase + " · " + phase.name,
+        (phase.soc == null ? "—" : phase.soc + " %") +
+        (phase.safety ? " · " + phase.safety : "")]);
+    }
     const body = card.querySelector('[data-tempo-body="true"]');
     if (body) {
       body.replaceChildren();
@@ -6859,8 +6868,9 @@ class MarstekVenusPanel extends HTMLElement {
     }
     const foot = card.querySelector('[data-tempo-foot="true"]');
     if (foot) {
-      foot.textContent = (a.warning ? "Alerte : " + a.warning + " · " : "") +
-        "Diagnostic uniquement — commande de charge Tempo non activée";
+      foot.textContent = (a.warning ? "Alerte données : " + a.warning + " · " : "") +
+        (a.control_enabled ? "Commande Tempo autorisée via Phase PD, sous limites configurées"
+          : "Mode diagnostic — activer EDF Tempo dans les options de l'intégration");
     }
   }
 

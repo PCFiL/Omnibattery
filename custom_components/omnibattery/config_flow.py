@@ -3791,9 +3791,48 @@ class OptionsFlowHandler(OptionsFlow):
             "time_slots",
             "excluded_devices",
             "predictive_charging",
+            "edf_tempo",
         ]
         return self.async_show_menu(step_id="init", menu_options=menu_options)
 
+
+    async def async_step_edf_tempo(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Opt in to EDF Tempo grid charging; disabled by default.
+
+        The existing predictive regulator still enforces grid import,
+        per-battery capability and phase power protections.
+        """
+        key = "tempo_grid_charge_enabled"
+        phase_key = "tempo_phase_import_limit_w"
+        existing = bool(self.config_entry.data.get(key, False))
+        phase_default = int(self.config_entry.data.get(phase_key, 2500))
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            enabled = bool(user_input.get(key, False))
+            if enabled:
+                edf = self.hass.states.get("sensor.edf_tempo")
+                rte = self.hass.states.get("sensor.rte_tempo_prochaine_couleur")
+                if edf is None or rte is None:
+                    errors["base"] = "tempo_sources_missing"
+                elif not self.config_entry.data.get("enable_predictive_charging", False):
+                    errors["base"] = "tempo_predictive_disabled"
+            if not errors:
+                self.config_data[key] = enabled
+                self.config_data[phase_key] = int(user_input.get(phase_key, phase_default))
+                return await self._save_and_finish()
+
+        return self.async_show_form(
+            step_id="edf_tempo",
+            data_schema=vol.Schema({
+                vol.Required(key, default=existing): bool,
+                vol.Required(phase_key, default=phase_default): vol.All(
+                    vol.Coerce(int), vol.Range(min=500, max=4000)
+                ),
+            }),
+            errors=errors,
+        )
 
     async def async_step_phase_pd(
         self, user_input: dict[str, Any] | None = None

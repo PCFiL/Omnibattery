@@ -137,6 +137,8 @@ class PhaseRuntime:
         ctl = self.controller
         if not self.active_batteries or ctl.manual_mode_enabled:
             return
+        # Reserve headroom across all phase decisions inside one controller cycle.
+        self._tempo_reserved_increment_w = 0.0
         for channel in self.channels:
             if not channel.enabled:
                 continue
@@ -223,6 +225,93 @@ class PhaseRuntime:
                 max_charge = 0
             if ctl.get_discharge_blockers(battery):
                 max_discharge = 0
+            # EDF Tempo night charge takes over the phase dispatcher itself.
+            # Phase PD remains the exclusive writer (owner=phase:Lx); the
+            # fleet predictive regulator must not write a phase-owned battery.
+            if getattr(ctl, "_tempo_charge_active", False):
+                from .edf_tempo import phase_tempo_charge_request
+                from math import isfinite
+
+                # A fresh global grid meter is mandatory: if unavailable,
+                # actively request safe standby rather than charging blindly.
+                global_state = ctl.hass.states.get(ctl.consumption_sensor)
+                global_power = ctl._apply_meter_transform(global_state)
+                report = getattr(global_state, "last_reported", None)
+                fresh = (
+                    report is not None
+                    and ctl._sensor_is_within_stale_tolerance(report)
+                )
+                if global_power is None or not isfinite(global_power) or not fresh:
+                    await self._force_zero(channel, battery, now=now)
+                    self.safety_status[phase] = "tempo_global_meter_invalid_or_stale"
+                    continue
+
+                # Preserve the existing channel rate limit and phase owner.
+                prior = self.manager.planner.states[channel.battery_key]
+                if (
+                    prior.last_command_at is not None
+                    and now - prior.last_command_at < channel.min_command_interval_s
+                ):
+                    self.safety_status[phase] = "tempo_rate_limited"
+                    continue
+
+                # Contract limit is shared between all phases. After each
+                # accepted increment, reserve it immediately for later phases
+                # in this very cycle (global meter reading may not update yet).
+                remaining = float(ctl._predictive_charge_ceiling()) - float(global_power)
+                remaining -= getattr(self, "_tempo_reserved_increment_w", 0.0)
+                soc = float(battery.data.get("battery_soc", 0) or 0)
+                weekly_manager = getattr(ctl, "_weekly_charge_mgr", None)
+                bms_full = bool(
+                    weekly_manager is not None
+                    and weekly_manager.is_battery_full(battery)
+                )
+                # is_battery_full handles coupled packs and BMS taper/retry;
+                # raw SOC=100 alone can be premature on multi-pack batteries.
+                if bms_full:
+                    max_charge = 0
+                request = phase_tempo_charge_request(
+                    grid_power_w=float(selected.reading.power_w),
+                    previous_command_w=prior.last_command_w,
+                    battery_max_charge_w=max_charge,
+                    phase_import_limit_w=float(
+                        ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500)
+                    ),
+                    grid_remaining_headroom_w=remaining,
+                    max_step_w=channel.max_step_w,
+                )
+                last = prior.last_command_w
+                if request == last:
+                    self.safety_status[phase] = "tempo_no_change"
+                    continue
+                ok = await ctl._set_battery_power(
+                    battery, request, 0, owner=f"phase:{phase}",
+                )
+                if ok:
+                    self.manager.acknowledge(phase, request, now=now)
+                    self._tempo_reserved_increment_w = (
+                        getattr(self, "_tempo_reserved_increment_w", 0.0)
+                        + max(0.0, request - max(0.0, last))
+                    )
+                    self.safety_status[phase] = "tempo_charge_command_accepted"
+                else:
+                    self.safety_status[phase] = "tempo_charge_command_unconfirmed"
+                continue
+
+            # Hard handover at 06:00 on red days: remove any residual
+            # overnight charging command before normal phase PD resumes.
+            state = self.manager.planner.states[channel.battery_key]
+            if getattr(ctl, "_tempo_red_peak_active", False) and state.last_command_w > 0:
+                ok = await ctl._set_battery_power(
+                    battery, 0, 0, owner=f"phase:{phase}", force_write=True,
+                )
+                if ok:
+                    self.manager.acknowledge(phase, 0, now=now)
+                    self.safety_status[phase] = "tempo_red_peak_charge_stopped"
+                else:
+                    self.safety_status[phase] = "tempo_red_peak_stop_unconfirmed"
+                continue
+
             proposed = self.manager.plan(
                 phase, selected.reading,
                 max_charge_w=max_charge,

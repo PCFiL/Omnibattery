@@ -814,7 +814,8 @@
           "capacity_protection": "Capacity protection",
           "hourly_balance": "Hourly net balance",
           "pd_advanced": "PD controller (advanced)",
-          "phase_pd": "Three-phase PD regulation (L1/L2/L3)"
+          "phase_pd": "Three-phase PD regulation (L1/L2/L3)",
+          "edf_tempo": "EDF Tempo — pre-red grid charging"
         }
       },
       "sensors": {
@@ -1480,6 +1481,14 @@
           "kd": "Derivative gain: reacts to how fast the phase error changes. Start at 0 to avoid amplifying measurement noise.",
           "fallback_grid_sensor": "Power sensor in W or kW used only if the primary is missing, invalid, or older than 15 seconds. Must measure the same phase with the same sign: positive = grid import."
         }
+      },
+      "edf_tempo": {
+        "title": "EDF Tempo — pre-red charging",
+        "description": "Charge to 100% in off-peak hours before red days, including consecutive red days. Requires EDF Tempo, RTE, predictive charging and phase safety. Disabled by default.",
+        "data": {
+          "tempo_grid_charge_enabled": "Enable automatic Tempo grid charging",
+          "tempo_phase_import_limit_w": "Per-phase grid import limit for Tempo charging (W)"
+        }
       }
     },
     "error": {
@@ -1531,7 +1540,9 @@
       "fallback_same_as_primary": "Primary and secondary sensors must differ.",
       "invalid_fallback_sensor": "Choose a valid sensor entity.",
       "duplicate_fallback_sensor": "One backup sensor is assigned multiple times.",
-      "sensor_reused_across_phases": "A power sensor is reused across phases."
+      "sensor_reused_across_phases": "A power sensor is reused across phases.",
+      "tempo_sources_missing": "EDF Tempo and RTE sensors are missing.",
+      "tempo_predictive_disabled": "Enable Omnibattery predictive charging first."
     },
     "abort": {
       "phase_pd_disable_first": "Disable all phase PD controllers before changing the mapping.",
