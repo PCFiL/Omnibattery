@@ -3791,9 +3791,42 @@ class OptionsFlowHandler(OptionsFlow):
             "time_slots",
             "excluded_devices",
             "predictive_charging",
+            "edf_tempo",
         ]
         return self.async_show_menu(step_id="init", menu_options=menu_options)
 
+
+    async def async_step_edf_tempo(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Opt in to EDF Tempo grid charging; disabled by default.
+
+        The existing predictive regulator still enforces grid import,
+        per-battery capability and phase power protections.
+        """
+        key = "tempo_grid_charge_enabled"
+        existing = bool(self.config_entry.data.get(key, False))
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            enabled = bool(user_input.get(key, False))
+            if enabled:
+                edf = self.hass.states.get("sensor.edf_tempo")
+                rte = self.hass.states.get("sensor.rte_tempo_prochaine_couleur")
+                if edf is None or rte is None:
+                    errors["base"] = "tempo_sources_missing"
+                elif not self.config_entry.data.get("enable_predictive_charging", False):
+                    errors["base"] = "tempo_predictive_disabled"
+            if not errors:
+                self.config_data[key] = enabled
+                return await self._save_and_finish()
+
+        return self.async_show_form(
+            step_id="edf_tempo",
+            data_schema=vol.Schema({
+                vol.Required(key, default=existing): bool,
+            }),
+            errors=errors,
+        )
 
     async def async_step_phase_pd(
         self, user_input: dict[str, Any] | None = None
