@@ -6015,6 +6015,10 @@ class MarstekVenusPanel extends HTMLElement {
       status.className = "phase-pd-status";
       status.style.marginBottom = "10px";
       r.phasePdBody.appendChild(status);
+      const performance = document.createElement("div");
+      performance.className = "phase-pd-performance";
+      performance.style.cssText = "padding:10px;margin:8px 0;border:1px solid var(--divider-color,#555);border-radius:8px;font-size:12px;line-height:1.6";
+      r.phasePdBody.appendChild(performance);
 
       if (toggleId) {
         const line = document.createElement("div");
@@ -6068,7 +6072,7 @@ class MarstekVenusPanel extends HTMLElement {
         r.phasePdBody.appendChild(line);
         item.input = input;
       }
-      r.phasePdWidgets = {status, toggleId, numeric};
+      r.phasePdWidgets = {status, performance, toggleId, numeric};
     }
     const widgets = r.phasePdWidgets;
     if (!widgets) return;
@@ -6077,6 +6081,36 @@ class MarstekVenusPanel extends HTMLElement {
     widgets.status.textContent = `Dry Run: ${status?.state || "indisponible"} · ` +
       `Réseau: ${a.grid_power_w ?? "—"} W · Δ: ${a.proposed_delta_w ?? "—"} W · ` +
       `Source: ${a.meter_source || "?"}`;
+    const perf = Object.values(hass.states || {}).find((st) =>
+      st.entity_id?.startsWith("sensor.") &&
+      String(st.attributes?.friendly_name || "").toLowerCase() ===
+        ("pd " + phase + " performance").toLowerCase()
+    );
+    if (widgets.performance) {
+      const p = perf?.attributes || {};
+      const fmt = (v, u = "") => v == null ? "—" : String(v) + u;
+      const lines = ["Performance " + phase + " (" + (perf?.state || "attente") + ")"];
+      for (const m of ["5", "15", "60"]) {
+        const w = p.windows?.[m] || {};
+        lines.push(m + " min : RMS " + fmt(w.rms_error_w, " W") +
+          " | erreur moyenne " + fmt(w.mean_abs_error_w, " W") +
+          " | dans bande " + fmt(w.within_deadband_pct, "%") +
+          (w.complete ? "" : " (partiel)"));
+      }
+      lines.push("Commandes acceptées " + fmt(p.commands_accepted) +
+        " | refusées " + fmt(p.commands_rejected));
+      lines.push("Basculements secours " + fmt(p.failovers) +
+        " | pertes des deux capteurs " + fmt(p.complete_meter_losses));
+      lines.push("0 W accepté " + fmt(p.standby_accepted) +
+        " | arrêt non confirmé " + fmt(p.standby_unconfirmed));
+      lines.push("Compteurs réinitialisés au rechargement de l'intégration.");
+      widgets.performance.replaceChildren();
+      for (const line of lines) {
+        const el = document.createElement("div");
+        el.textContent = line;
+        widgets.performance.appendChild(el);
+      }
+    }
     const toggle = r.phasePdBody.querySelector(".phase-pd-toggle");
     if (toggle && widgets.toggleId) {
       toggle.classList.toggle("on", hass.states[widgets.toggleId]?.state === "on");
