@@ -3655,6 +3655,8 @@ class ChargeDischargeController:
         can recover cleanly even if in-memory tracking was lost. Never changes
         stored user limits. Reuses each coordinator's existing write method.
         """
+        if self.manual_mode_enabled:
+            return
         for coordinator in self.coordinators:
             if getattr(coordinator, "brand", None) != "zendure":
                 continue
