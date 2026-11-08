@@ -11264,6 +11264,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     entry.async_on_unload(unsub_blueprint_measurement)
 
+    # EDF Tempo planning diagnostics are intentionally read-only until the
+    # battery control owner has a tested Tempo priority/dispatch integration.
+    if not hass.data[DOMAIN].get("_tempo_diagnostics_registered"):
+        from .control.edf_tempo import publish_tempo_diagnostics
+
+        def _publish_tempo(_now=None):
+            try:
+                publish_tempo_diagnostics(hass, dt_util.now())
+            except Exception:
+                _LOGGER.exception("EDF Tempo diagnostic refresh failed")
+
+        _publish_tempo()
+        _unsub_tempo = async_track_time_interval(
+            hass, _publish_tempo, timedelta(minutes=1)
+        )
+        hass.data[DOMAIN]["_tempo_diagnostics_registered"] = True
+
+        def _cleanup_tempo():
+            _unsub_tempo()
+            hass.data.get(DOMAIN, {}).pop("_tempo_diagnostics_registered", None)
+            hass.states.async_remove("sensor.omnibattery_edf_tempo")
+
+        entry.async_on_unload(_cleanup_tempo)
+
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinators": coordinators,
         "controller": controller,
