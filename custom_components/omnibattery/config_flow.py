@@ -3805,7 +3805,9 @@ class OptionsFlowHandler(OptionsFlow):
         per-battery capability and phase power protections.
         """
         key = "tempo_grid_charge_enabled"
+        phase_key = "tempo_phase_import_limit_w"
         existing = bool(self.config_entry.data.get(key, False))
+        phase_default = int(self.config_entry.data.get(phase_key, 2500))
         errors: dict[str, str] = {}
         if user_input is not None:
             enabled = bool(user_input.get(key, False))
@@ -3818,12 +3820,16 @@ class OptionsFlowHandler(OptionsFlow):
                     errors["base"] = "tempo_predictive_disabled"
             if not errors:
                 self.config_data[key] = enabled
+                self.config_data[phase_key] = int(user_input.get(phase_key, phase_default))
                 return await self._save_and_finish()
 
         return self.async_show_form(
             step_id="edf_tempo",
             data_schema=vol.Schema({
                 vol.Required(key, default=existing): bool,
+                vol.Required(phase_key, default=phase_default): vol.All(
+                    vol.Coerce(int), vol.Range(min=500, max=4000)
+                ),
             }),
             errors=errors,
         )
