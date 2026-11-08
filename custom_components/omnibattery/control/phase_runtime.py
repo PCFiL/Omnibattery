@@ -87,8 +87,8 @@ class PhaseRuntime:
     def _performance(self, phase):
         """Return optional instrumentation without affecting battery control."""
         from ..const import DOMAIN
-        data = self.controller.hass.data.get(DOMAIN, {}).get(
-            self.controller.config_entry.entry_id, {}
+        data = getattr(self.controller.hass, "data", {}).get(DOMAIN, {}).get(
+            getattr(self.controller.config_entry, "entry_id", ""), {}
         )
         tracker = data.get("phase_performance")
         return tracker.phase(phase) if tracker is not None else None
