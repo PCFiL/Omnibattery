@@ -36,6 +36,7 @@ class WeeklyFullChargeTime(TimeEntity):
         self.entry = entry
         self.field = field
         suffix = f"weekly_full_charge_{field}"
+        self._attr_translation_key = suffix
         self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}{suffix}"
         self.entity_id = system_entity_id("time", suffix)
         self._attr_name = (
