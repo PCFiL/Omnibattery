@@ -338,7 +338,15 @@ class WeeklyFullChargeManager:
         # Forced charging (the existing manual button) bypasses this schedule.
         start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
         end = ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
-        if not in_window(now, start=start, end=end):
+        try:
+            inside_window = in_window(now, start=start, end=end)
+        except ValueError:
+            _LOGGER.error(
+                "Weekly Full Charge: invalid clock window %r–%r; "
+                "disabling the exceptional 100%% target", start, end
+            )
+            inside_window = False
+        if not inside_window:
             # Expiring a window restores temporary 100% hardware ceilings on
             # the next handle_registers() call; the software 100% override
             # stops immediately because is_active() returns False here.
