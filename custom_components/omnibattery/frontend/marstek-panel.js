@@ -5717,10 +5717,48 @@ class MarstekVenusPanel extends HTMLElement {
         },
       });
     }
-    list.sort((a, b) =>
-      String(a.name || a.dev).localeCompare(String(b.name || b.dev), this._lang())
-    );
+    const byName = (a, b) =>
+      String(a.name || a.dev).localeCompare(String(b.name || b.dev), this._lang());
+    if (this._batterySortMode === "name") {
+      list.sort(byName);
+    } else {
+      list.sort((a, b) => this._batteryPhaseOrder(a) - this._batteryPhaseOrder(b) || byName(a, b));
+    }
     return list;
+  }
+
+  /** Read the physical phase configured on this battery, not its display name. */
+  _batteryPhaseOrder(b) {
+    const phaseEntityId = b.entIdsDomain?.["select:battery_phase"];
+    const raw = phaseEntityId ? this._hass.states[phaseEntityId]?.state : null;
+    const normalized = String(raw || "").toLowerCase().trim();
+    const match = normalized.match(/^(?:l|p|phase\s*)?\s*([123])$/);
+    if (match) return Number(match[1]);
+    // Use the exact physical-battery mapping from the phase PD diagnostic
+    // only if the battery-phase selector is unavailable.
+    const diagnostics = Object.values(this._hass.states || {});
+    for (let n = 1; n <= 3; n++) {
+      const diagnostic = diagnostics.find((st) =>
+        st?.entity_id?.startsWith("sensor.") &&
+        String(st.attributes?.friendly_name || "").toLowerCase() ===
+          `pd l${n} dry run` &&
+        st.attributes?.battery === b.name
+      );
+      if (diagnostic) return n;
+    }
+    return 99; // Non-assigned batteries after physical phases.
+  }
+
+  /** Move existing cards without rebuilding their controls or losing focus. */
+  _reorderBatteryCards(list) {
+    const grid = this._batGrid;
+    if (!grid) return;
+    list.forEach((b, index) => {
+      const card = this._batCards?.[b.dev]?.card;
+      if (card && grid.children[index] !== card) {
+        grid.insertBefore(card, grid.children[index] || null);
+      }
+    });
   }
 
   _batteryCardSig(b) {
@@ -5733,17 +5771,47 @@ class MarstekVenusPanel extends HTMLElement {
     const list = this._batteryModel();
     this._batSig = list.map((b) => this._batteryCardSig(b)).sort().join("|");
     const wrap = document.createElement("div");
-    wrap.className = "bat-grid";
+    const toolbar = document.createElement("div");
+    toolbar.style.cssText = "display:flex;align-items:center;justify-content:flex-end;gap:10px;margin:0 0 12px";
+    const label = document.createElement("label");
+    label.textContent = "Ordre des batteries";
+    label.style.fontSize = "13px";
+    label.htmlFor = "omni-battery-sort";
+    const sort = document.createElement("select");
+    sort.id = "omni-battery-sort";
+    sort.setAttribute("aria-label", "Ordre d'affichage des batteries");
+    sort.style.cssText = "background:var(--bg-2,#222);color:inherit;border:1px solid var(--divider-color,#555);border-radius:6px;padding:6px 10px;font:inherit";
+    for (const [value, text] of [
+      ["phase", "Phases P1 → P2 → P3"],
+      ["name", "Nom (A → Z)"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      sort.appendChild(option);
+    }
+    sort.value = this._batterySortMode || "phase";
+    sort.addEventListener("change", () => {
+      this._batterySortMode = sort.value;
+      this._reorderBatteryCards(this._batteryModel());
+    });
+    label.appendChild(sort);
+    toolbar.appendChild(label);
+    wrap.appendChild(toolbar);
+    const grid = document.createElement("div");
+    grid.className = "bat-grid";
+    this._batGrid = grid;
+    wrap.appendChild(grid);
     if (!list.length) {
       const e = document.createElement("div");
       e.className = "placeholder";
       e.innerHTML =
         `<ha-icon icon="mdi:battery-off-outline"></ha-icon><h3>${this._t("noBatteriesTitle")}</h3>` +
         `<p>${this._t("noBatteriesMsg")}</p>`;
-      wrap.appendChild(e);
+      grid.appendChild(e);
       return wrap;
     }
-    for (const b of list) wrap.appendChild(this._buildBatteryCard(b));
+    for (const b of list) grid.appendChild(this._buildBatteryCard(b));
     return wrap;
   }
 
@@ -6137,6 +6205,7 @@ class MarstekVenusPanel extends HTMLElement {
       this._main.appendChild(this._renderBaterias());
       list = this._batteryModel();
     }
+    this._reorderBatteryCards(list);
     for (const b of list) {
       const r = this._batCards[b.dev];
       if (r) this._patchBatteryCard(r, b);
