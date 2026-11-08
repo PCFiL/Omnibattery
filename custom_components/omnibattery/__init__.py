@@ -3669,7 +3669,17 @@ class ChargeDischargeController:
             name = coordinator.name
             if self._tempo_charge_active:
                 if name in self._tempo_cutoff_applied:
-                    continue
+                    # The weekly manager can restore its own SOC limit at a
+                    # day boundary. Re-assert 100% if telemetry confirms a
+                    # different hardware value (without hammering the API).
+                    observed = coordinator.data.get("soc_set")
+                    try:
+                        confirmed = observed is None or float(observed) >= 99.9
+                    except (TypeError, ValueError):
+                        confirmed = False
+                    if confirmed:
+                        continue
+                    self._tempo_cutoff_applied.discard(name)
                 # The configured maximum, not the temporarily written cutoff,
                 # is authoritative for restoration.
                 original = self._weekly_charge_mgr._get_configured_max_soc(coordinator)
@@ -3679,7 +3689,7 @@ class ChargeDischargeController:
                     _LOGGER.exception("Tempo: failed to set 100%% cutoff on %s", name)
                     ok = False
                 if ok:
-                    self._tempo_original_cutoffs[name] = original
+                    self._tempo_original_cutoffs.setdefault(name, original)
                     self._tempo_cutoff_applied.add(name)
                 else:
                     # Do not force a software 100% target while the hardware
