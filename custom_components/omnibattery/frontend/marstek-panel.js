@@ -6157,13 +6157,55 @@ class MarstekVenusPanel extends HTMLElement {
     if (widgets.performance) {
       const p = perf?.attributes || {};
       const fmt = (v, u = "") => v == null ? "—" : String(v) + u;
+      const blockerLabels = {
+        pd_disabled: "PD désactivé",
+        meter_unavailable: "Mesure réseau indisponible",
+        battery_unavailable: "Batterie indisponible",
+        other_control_owner: "Contrôle manuel ou autre mode prioritaire",
+        controller_unavailable: "Contrôleur indisponible",
+        safety_state_unavailable: "État des protections indisponible",
+        discharge_power_limit: "Décharge limitée à 0 W",
+        charge_power_limit: "Charge limitée à 0 W",
+        invalid_settings: "Réglages PD invalides",
+        within_deadband: "Dans la bande morte",
+        can_charge: "Charge autorisée",
+        can_discharge: "Décharge autorisée",
+      };
+      const readableBlocker = (reason) => {
+        if (!reason) return "—";
+        const [kind, sources] = String(reason).split(":", 2);
+        const prefix = kind === "discharge_blocked" ? "Décharge bloquée"
+          : kind === "charge_blocked" ? "Charge bloquée" : null;
+        if (!prefix) return blockerLabels[kind] || kind;
+        const reasonText = String(sources || "").split(",").map((key) =>
+          /soc/i.test(key) ? "limite SOC" : key
+        ).join(", ");
+        return prefix + (reasonText ? " : " + reasonText : "");
+      };
+      const currentReason = a.regulation_block_reason || p.block_reason;
       const lines = ["Performance " + phase + " (" + (perf?.state || "attente") + ")"];
+      lines.push("État de régulation : " + readableBlocker(currentReason));
+      lines.push("RÉSEAU BRUT (toutes les mesures valides)");
       for (const m of ["5", "15", "60"]) {
         const w = p.windows?.[m] || {};
         lines.push(m + " min : RMS " + fmt(w.rms_error_w, " W") +
           " | erreur moyenne " + fmt(w.mean_abs_error_w, " W") +
           " | dans bande " + fmt(w.within_deadband_pct, "%") +
           (w.complete ? "" : " (partiel)"));
+      }
+      lines.push("RÉGULATION AUTORISÉE (échantillons sans blocage)");
+      for (const m of ["5", "15", "60"]) {
+        const w = p.windows?.[m] || {};
+        lines.push(m + " min : RMS " + fmt(w.eligible_rms_error_w, " W") +
+          " | erreur moyenne " + fmt(w.eligible_mean_abs_error_w, " W") +
+          " | dans bande " + fmt(w.eligible_within_deadband_pct, "%") +
+          " | utilisables " + fmt(w.eligible_samples) + "/" + fmt(w.samples) +
+          " (" + fmt(w.eligible_pct, "%") + ")");
+        if (w.excluded_reasons && Object.keys(w.excluded_reasons).length) {
+          const details = Object.entries(w.excluded_reasons)
+            .map(([why, count]) => readableBlocker(why) + " : " + count).join(" · ");
+          lines.push("  Hors calcul " + m + " min : " + details);
+        }
       }
       lines.push("Commandes acceptées " + fmt(p.commands_accepted) +
         " | refusées " + fmt(p.commands_rejected));
