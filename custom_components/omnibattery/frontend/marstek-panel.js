@@ -6642,6 +6642,9 @@ class MarstekVenusPanel extends HTMLElement {
       msg: this._t("sysEmptyMsg"),
     });
     this._ctlSig = sig;
+    const tempoCard = this._buildTempoStatusCard();
+    this._makeCardDraggable(tempoCard, wrap);
+    wrap.prepend(tempoCard);
     // Only offer drag-to-arrange when there are real cards (not the empty state).
     if (!wrap.querySelector(".card")) return wrap;
     // Hidden cards move to their own stack BEFORE layout so the grid/matrix only
@@ -6663,7 +6666,6 @@ class MarstekVenusPanel extends HTMLElement {
     root.className = "ctl-root";
     this._ctlRoot = root; // _applyArrangeMode toggles .arranging here too
     root.appendChild(this._buildArrangeBar(wrap));
-    root.appendChild(this._buildTempoStatusCard());
     root.appendChild(wrap);
     if (hiddenStack.childElementCount) {
       const sec = document.createElement("div");
@@ -6804,24 +6806,20 @@ class MarstekVenusPanel extends HTMLElement {
     if (tools) tools.style.display = on ? "" : "none";
     for (const card of stack.querySelectorAll(".card")) card.draggable = on;
   }
-  // EDF Tempo read-only integration status. Charging commands remain owned by
-  // the existing controller; the card never writes to any battery entity.
+  // Compact Tempo card: same card/header/grid as other system controls.
   _buildTempoStatusCard() {
-    const card = document.createElement("section");
-    card.className = "card";
+    const { card, head } = this._card("EDF TEMPO · PLANIFICATION", "mdi:calendar-clock");
+    card.dataset.tk = "secTempo";
     card.dataset.tempoCard = "true";
-    card.style.cssText = "margin:12px 0;padding:16px;display:block";
-    const title = document.createElement("h2");
-    title.textContent = "EDF Tempo · Planification";
-    title.style.cssText = "font-size:1.05rem;margin:0 0 12px";
-    card.appendChild(title);
+    this._attachHelp(head, "Couleur Tempo, charge réseau et état des trois batteries.");
     const info = document.createElement("div");
     info.dataset.tempoBody = "true";
-    info.style.cssText = "display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:.9rem";
+    info.className = "bat-ctl-grid sys-grid";
+    info.style.cssText = "display:flex;flex-direction:column;gap:10px;min-width:0";
     card.appendChild(info);
     const foot = document.createElement("div");
     foot.dataset.tempoFoot = "true";
-    foot.style.cssText = "margin-top:12px;font-size:.8rem;opacity:.78";
+    foot.style.cssText = "font-size:12px;line-height:1.4;opacity:.75;margin-top:12px;overflow-wrap:anywhere";
     card.appendChild(foot);
     this._updateTempoStatusCard(card);
     return card;
@@ -6831,47 +6829,57 @@ class MarstekVenusPanel extends HTMLElement {
     if (!card) return;
     const state = this._hass?.states?.["sensor.omnibattery_edf_tempo"];
     const a = state?.attributes || {};
-    const mode = state?.state || "unavailable";
+    const mode = state?.state;
+    const color = (v) => {
+      const c = String(v || "").toLowerCase();
+      return c === "rouge" ? "🔴 Rouge" : c === "blanc" ? "⚪ Blanc" :
+        c === "bleu" ? "🔵 Bleu" : "—";
+    };
     const entries = [
-      ["Aujourd'hui", a.today_color],
-      ["Demain", a.tomorrow_color],
-      ["Stratégie", mode === "charge_before_red" ? "Charge 100 % avant rouge"
-        : mode === "red_peak_discharge" ? "Protection HP rouges"
-        : mode === "normal" ? "Fonctionnement normal" : "Indisponible"],
+      ["Aujourd'hui", color(a.today_color)],
+      ["Demain", color(a.tomorrow_color)],
+      ["Stratégie", mode === "charge_before_red" ? "Charge 100 % avant rouge" :
+        mode === "red_peak_discharge" ? "Heures pleines rouges" :
+        mode === "normal" ? "Fonctionnement normal" : "Indisponible"],
       ["SOC cible", a.target_soc == null ? "—" : a.target_soc + " %"],
       ["Échéance", a.deadline ? new Date(a.deadline).toLocaleString("fr-FR") : "—"],
-      ["Prix en cours", Number.isFinite(Number(a.price_eur_kwh))
-        && a.price_eur_kwh != null ? Number(a.price_eur_kwh).toFixed(4) + " €/kWh" : "—"],
-      ["Commande Tempo", !a.control_enabled ? "Désactivée"
-        : a.control_active ? "Charge réseau autorisée" : "Veille / hors créneau"],
-      ["Plafond import/phase", a.phase_import_limit_w != null
-        ? a.phase_import_limit_w + " W" : "—"],
+      ["Prix en cours", a.price_eur_kwh == null || !Number.isFinite(Number(a.price_eur_kwh)) ?
+        "—" : Number(a.price_eur_kwh).toFixed(4) + " €/kWh"],
+      ["Commande Tempo", !a.control_enabled ? "Désactivée" :
+        a.control_active ? "Charge réseau autorisée" : "En attente"],
+      ["Plafond import/phase", a.phase_import_limit_w == null ? "—" :
+        a.phase_import_limit_w + " W"],
     ];
-    for (const phase of (Array.isArray(a.phases) ? a.phases : [])) {
-      entries.push([phase.phase + " · " + phase.name,
-        (phase.soc == null ? "—" : phase.soc + " %") +
-        (phase.safety ? " · " + phase.safety : "")]);
-    }
-    const body = card.querySelector('[data-tempo-body="true"]');
-    if (body) {
-      body.replaceChildren();
-      for (const [label, value] of entries) {
-        const item = document.createElement("div");
-        const name = document.createElement("div");
-        name.style.opacity = ".7";
-        name.textContent = label;
-        const val = document.createElement("strong");
+    const info = card.querySelector('[data-tempo-body="true"]');
+    if (info) {
+      info.replaceChildren();
+      const addRow = (label, value, heading = false) => {
+        const line = document.createElement("div");
+        line.style.cssText = "display:flex;flex-direction:column;gap:2px;min-width:0";
+        if (heading) line.style.cssText += ";padding-top:8px;border-top:1px solid var(--divider-color,rgba(127,127,127,.22))";
+        const k = document.createElement("div");
+        k.className = "ctl-k";
+        k.style.cssText = "font-size:12px;opacity:.82;overflow-wrap:anywhere";
+        k.textContent = label;
+        const val = document.createElement("div");
+        val.className = "ctl-val";
+        val.style.cssText = "font-size:14px;font-weight:600;white-space:normal;overflow-wrap:anywhere";
         val.textContent = value == null ? "—" : String(value);
-        item.append(name, val);
-        body.appendChild(item);
+        line.append(k, val);
+        info.appendChild(line);
+      };
+      for (const [label, value] of entries) addRow(label, value);
+      for (const phase of (Array.isArray(a.phases) ? a.phases : [])) {
+        const shortName = String(phase.name || "").replace(/^Zendure SolarFlow\s*/i, "");
+        addRow(phase.phase + " · " + shortName,
+          phase.soc == null ? "SOC —" : "SOC " + phase.soc + " %", true);
+        if (phase.safety) addRow("État de la phase", phase.safety);
       }
     }
     const foot = card.querySelector('[data-tempo-foot="true"]');
-    if (foot) {
-      foot.textContent = (a.warning ? "Alerte données : " + a.warning + " · " : "") +
-        (a.control_enabled ? "Commande Tempo autorisée via Phase PD, sous limites configurées"
-          : "Mode diagnostic — activer EDF Tempo dans les options de l'intégration");
-    }
+    if (foot) foot.textContent = (a.warning ? "Alerte : " + a.warning + " · " : "") +
+      (a.control_enabled ? "Pilotage Tempo activé dans les options de l'intégration" :
+      "Mode diagnostic · Activer EDF Tempo dans les options Omnibattery");
   }
 
   _patchControl() {
