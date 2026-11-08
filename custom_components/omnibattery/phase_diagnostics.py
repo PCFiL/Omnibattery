@@ -20,6 +20,7 @@ from .control.phase_config import PHASES, channel_data
 from .const import DOMAIN
 from .control.phase_dry_run import estimate_phase
 from .control.phase_meter_fallback import select_phase_meter
+from .control.phase_performance import PhasePerformanceTracker
 
 
 class PhaseDryRunSensor(SensorEntity):
@@ -112,6 +113,15 @@ class PhaseDryRunSensor(SensorEntity):
         self._secondary_id = secondary_id
         self._live_pd_enabled = bool(data.get("enabled", False))
         self._kd = float(data.get("kd", 0))
+        if type(self) is PhaseDryRunSensor:
+            tracker = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("phase_performance")
+            if tracker is not None:
+                tracker.phase(self.phase).observe(
+                    error_w=self._result.error_w if self._result.grid_w is not None else None,
+                    source=self._meter_source,
+                    deadband_w=float(data.get("deadband_w", 50)),
+                    enabled=self._live_pd_enabled,
+                )
         runtime = getattr(
             (self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get("controller")),
             "_phase_runtime", None,
@@ -195,10 +205,53 @@ class PhaseDryRunMetricSensor(PhaseDryRunSensor):
         }
 
 
+class PhasePerformanceSensor(SensorEntity):
+    """Rolling PD quality and intervention counters for one physical phase."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:chart-timeline-variant"
+    _attr_should_poll = False
+
+    def __init__(self, hass, entry, phase, tracker):
+        self.hass = hass
+        self.entry = entry
+        self.phase = phase
+        self.tracker = tracker
+        self._attr_unique_id = f"omni_phase_performance_{entry.entry_id}_{phase}"
+        self._attr_name = f"PD {phase} performance"
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        self.async_on_remove(async_track_time_interval(
+            self.hass, self._refresh, timedelta(seconds=5)
+        ))
+
+    @callback
+    def _refresh(self, _now):
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self):
+        return "active" if channel_data(self.entry, self.phase).get("enabled", False) else "paused"
+
+    @property
+    def extra_state_attributes(self):
+        stats = self.tracker.phase(self.phase).snapshot()
+        return {
+            "phase": self.phase,
+            **stats,
+            "note": "Rolling sample statistics while phase PD is enabled; windows and counters reset on integration reload. Command count means accepted writer requests, not guaranteed AC delivery.",
+        }
+
+
 def create_phase_diagnostic_entities(hass, entry, coordinators):
+    integration_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    tracker = integration_data.setdefault("phase_performance", PhasePerformanceTracker())
     entities = []
     for phase in PHASES:
         entities.append(PhaseDryRunSensor(hass, entry, phase, coordinators))
+        entities.append(PhasePerformanceSensor(hass, entry, phase, tracker))
         for metric in ("grid_power", "error", "proposed_delta"):
             entities.append(PhaseDryRunMetricSensor(
                 hass, entry, phase, coordinators, metric
