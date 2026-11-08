@@ -3663,6 +3663,10 @@ class ChargeDischargeController:
                 continue
             if self._is_battery_manual_owned(coordinator):
                 continue
+            if self._is_backup_function_active(coordinator):
+                continue
+            if getattr(coordinator, "rs485_user_disabled", False):
+                continue
             if not coordinator.is_available or coordinator.data is None:
                 continue
 
