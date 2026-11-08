@@ -571,6 +571,7 @@ class WeeklyFullChargeManager:
             ctrl._weekly_charge_saved_max_soc.clear()
             getattr(self, "_cutoff_applied_names", set()).clear()
             ctrl._weekly_charge_needs_restore = False
+            ctrl.weekly_full_charge_registers_written = False
             if not was_complete:
                 ctrl._weekly_charge_status["state"] = "Idle"
                 ctrl._weekly_charge_status.pop("completion_reason", None)
