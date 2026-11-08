@@ -87,6 +87,12 @@ def read_tempo_snapshot(hass: Any, now: datetime) -> TempoSnapshot:
     rte_tomorrow = _state(hass, RTE_TOMORROW_SENSOR)
     rte_today_color = normalize_color(rte_today.state) if rte_today else None
     rte_tomorrow_color = normalize_color(rte_tomorrow.state) if rte_tomorrow else None
+    if local.time() < time(6, 0):
+        # EDF today_color follows the civil date, while RTE current color
+        # belongs to the Tempo day ending at 06:00. Compare EDF today with
+        # RTE's next color during the midnight-06:00 transition instead.
+        rte_today_color = rte_tomorrow_color
+        rte_tomorrow_color = None
     if today and rte_today_color and today != rte_today_color:
         warning = "today_color_conflict"
     if tomorrow and rte_tomorrow_color and tomorrow != rte_tomorrow_color:
