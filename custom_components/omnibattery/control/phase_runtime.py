@@ -266,7 +266,9 @@ class PhaseRuntime:
                     weekly_manager is not None
                     and weekly_manager.is_battery_full(battery)
                 )
-                if soc >= 100.0 or bms_full:
+                # is_battery_full handles coupled packs and BMS taper/retry;
+                # raw SOC=100 alone can be premature on multi-pack batteries.
+                if bms_full:
                     max_charge = 0
                 request = phase_tempo_charge_request(
                     grid_power_w=float(selected.reading.power_w),
