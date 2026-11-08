@@ -159,6 +159,19 @@ def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) 
     """Publish a dashboard-only HA state. Does not change battery outputs."""
     snapshot = read_tempo_snapshot(hass, now)
     plan = plan_tempo(now, snapshot)
+    phase_batteries = []
+    runtime = getattr(controller, "_phase_runtime", None)
+    if runtime is not None:
+        for phase, channel in sorted(runtime.by_phase.items()):
+            battery = runtime.by_name.get(channel.battery_key)
+            data = getattr(battery, "data", None) or {}
+            phase_batteries.append({
+                "phase": phase,
+                "name": channel.battery_key,
+                "soc": data.get("battery_soc"),
+                "safety": runtime.safety_status.get(phase),
+            })
+
     hass.states.async_set(
         "sensor.omnibattery_edf_tempo",
         plan.mode,
@@ -176,6 +189,10 @@ def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) 
             "mode": plan.mode,
             "control_enabled": bool(getattr(controller, "tempo_grid_charge_enabled", False)),
             "control_active": bool(getattr(controller, "_tempo_charge_active", False)),
+            "phase_import_limit_w": (controller.config_entry.data.get(
+                "tempo_phase_import_limit_w", 2500
+            ) if controller else None),
+            "phases": phase_batteries,
         },
     )
     return plan
