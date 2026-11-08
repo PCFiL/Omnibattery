@@ -261,7 +261,12 @@ class PhaseRuntime:
                 remaining = float(ctl._predictive_charge_ceiling()) - float(global_power)
                 remaining -= getattr(self, "_tempo_reserved_increment_w", 0.0)
                 soc = float(battery.data.get("battery_soc", 0) or 0)
-                if soc >= 100.0:
+                weekly_manager = getattr(ctl, "_weekly_charge_mgr", None)
+                bms_full = bool(
+                    weekly_manager is not None
+                    and weekly_manager.is_battery_full(battery)
+                )
+                if soc >= 100.0 or bms_full:
                     max_charge = 0
                 request = phase_tempo_charge_request(
                     grid_power_w=float(selected.reading.power_w),
@@ -289,6 +294,20 @@ class PhaseRuntime:
                     self.safety_status[phase] = "tempo_charge_command_accepted"
                 else:
                     self.safety_status[phase] = "tempo_charge_command_unconfirmed"
+                continue
+
+            # Hard handover at 06:00 on red days: remove any residual
+            # overnight charging command before normal phase PD resumes.
+            state = self.manager.planner.states[channel.battery_key]
+            if getattr(ctl, "_tempo_red_peak_active", False) and state.last_command_w > 0:
+                ok = await ctl._set_battery_power(
+                    battery, 0, 0, owner=f"phase:{phase}", force_write=True,
+                )
+                if ok:
+                    self.manager.acknowledge(phase, 0, now=now)
+                    self.safety_status[phase] = "tempo_red_peak_charge_stopped"
+                else:
+                    self.safety_status[phase] = "tempo_red_peak_stop_unconfirmed"
                 continue
 
             proposed = self.manager.plan(
