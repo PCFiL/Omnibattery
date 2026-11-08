@@ -236,9 +236,14 @@ class PhaseRuntime:
                 # actively request safe standby rather than charging blindly.
                 global_state = ctl.hass.states.get(ctl.consumption_sensor)
                 global_power = ctl._apply_meter_transform(global_state)
-                if global_power is None or not isfinite(global_power):
+                report = getattr(global_state, "last_reported", None)
+                fresh = (
+                    report is not None
+                    and ctl._sensor_is_within_stale_tolerance(report)
+                )
+                if global_power is None or not isfinite(global_power) or not fresh:
                     await self._force_zero(channel, battery, now=now)
-                    self.safety_status[phase] = "tempo_global_meter_invalid"
+                    self.safety_status[phase] = "tempo_global_meter_invalid_or_stale"
                     continue
 
                 # Preserve the existing channel rate limit and phase owner.
