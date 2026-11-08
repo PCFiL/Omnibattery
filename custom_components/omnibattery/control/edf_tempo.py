@@ -149,7 +149,7 @@ def plan_tempo(now: datetime, snapshot: TempoSnapshot,
                      snapshot.prices.get(price_key), snapshot.warning)
 
 
-def publish_tempo_diagnostics(hass: Any, now: datetime) -> TempoPlan:
+def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) -> TempoPlan:
     """Publish a dashboard-only HA state. Does not change battery outputs."""
     snapshot = read_tempo_snapshot(hass, now)
     plan = plan_tempo(now, snapshot)
@@ -168,7 +168,37 @@ def publish_tempo_diagnostics(hass: Any, now: datetime) -> TempoPlan:
             "prices_eur_kwh": snapshot.prices,
             "warning": plan.warning,
             "mode": plan.mode,
-            "control_enabled": False,
+            "control_enabled": bool(getattr(controller, "tempo_grid_charge_enabled", False)),
+            "control_active": bool(getattr(controller, "_tempo_charge_active", False)),
         },
     )
     return plan
+
+
+def phase_tempo_charge_request(
+    *, grid_power_w: float, previous_command_w: float,
+    battery_max_charge_w: float, phase_import_limit_w: float,
+    grid_remaining_headroom_w: float, max_step_w: float,
+) -> float:
+    """Bound a phase charge setpoint by live phase and global import headroom.
+
+    All watt values are positive for grid import / battery charging. This
+    is a pure planner; hardware limits/communication ownership still live in
+    PhaseRuntime and the controller. An overload may reduce power immediately.
+    """
+    values = (grid_power_w, previous_command_w, battery_max_charge_w,
+              phase_import_limit_w, grid_remaining_headroom_w, max_step_w)
+    if not all(isfinite(float(v)) for v in values):
+        return 0.0
+
+    previous = max(0.0, previous_command_w)
+    maximum = max(0.0, battery_max_charge_w)
+    phase_budget = phase_import_limit_w - grid_power_w
+    global_budget = grid_remaining_headroom_w
+    target = min(maximum, previous + phase_budget, previous + global_budget)
+    target = max(0.0, target)
+
+    if target <= previous:
+        # Load reduction must not be delayed when a phase/grid cap is reached.
+        return target
+    return min(target, previous + max(0.0, max_step_w))
