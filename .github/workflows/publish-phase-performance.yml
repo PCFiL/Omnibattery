@@ -1,0 +1,35 @@
+name: Publish phase PD performance dashboard
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-phase-performance.yml
+      - scripts/add_phase_pd_performance_dashboard.py
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Add read-only performance tiles
+        run: python scripts/add_phase_pd_performance_dashboard.py
+      - name: Syntax-check patched JavaScript
+        run: node --check custom_components/omnibattery/frontend/marstek-panel.js
+      - name: Publish dashboard
+        run: |
+          if git diff --quiet -- custom_components/omnibattery/frontend/marstek-panel.js; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components/omnibattery/frontend/marstek-panel.js
+          git commit -m "feat(ui): display phase PD rolling quality and intervention counters"
+          git push origin HEAD:main
