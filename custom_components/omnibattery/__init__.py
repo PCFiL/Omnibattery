@@ -1223,6 +1223,8 @@ class ChargeDischargeController:
         self._tempo_red_peak_active = False
         self._tempo_plan = None
         self._tempo_last_active = False
+        self._tempo_original_cutoffs: dict[str, int] = {}
+        self._tempo_cutoff_applied: set[str] = set()
 
         # Weekly Full Charge state
         self.weekly_full_charge_enabled = config_entry.data.get(CONF_ENABLE_WEEKLY_FULL_CHARGE, False)
@@ -3645,6 +3647,63 @@ class ChargeDischargeController:
             )
         except Exception:
             _LOGGER.exception("Tempo: unable to read validated EDF/RTE data")
+
+    async def _reconcile_tempo_hardware_cutoffs(self) -> None:
+        """Temporarily raise Zendure socSet to 100%, restore at window end.
+
+        Uses the configuration's max_soc as the original value, so a restart
+        can recover cleanly even if in-memory tracking was lost. Never changes
+        stored user limits. Reuses each coordinator's existing write method.
+        """
+        for coordinator in self.coordinators:
+            if getattr(coordinator, "brand", None) != "zendure":
+                continue
+            caps = getattr(coordinator, "capabilities", None)
+            if not getattr(caps, "hardware_soc_cutoff", False):
+                continue
+            if self._is_battery_manual_owned(coordinator):
+                continue
+            if not coordinator.is_available or coordinator.data is None:
+                continue
+
+            name = coordinator.name
+            if self._tempo_charge_active:
+                if name in self._tempo_cutoff_applied:
+                    continue
+                # The configured maximum, not the temporarily written cutoff,
+                # is authoritative for restoration.
+                original = self._weekly_charge_mgr._get_configured_max_soc(coordinator)
+                try:
+                    ok = await coordinator.set_charge_cutoff(100)
+                except Exception:
+                    _LOGGER.exception("Tempo: failed to set 100%% cutoff on %s", name)
+                    ok = False
+                if ok:
+                    self._tempo_original_cutoffs[name] = original
+                    self._tempo_cutoff_applied.add(name)
+                else:
+                    # Do not force a software 100% target while the hardware
+                    # cutoff could remain lower and be out of sync.
+                    self._tempo_charge_active = False
+                    _LOGGER.error("Tempo: charge paused, 100%% cutoff unconfirmed for %s", name)
+            elif name in self._tempo_cutoff_applied:
+                # The weekly owner may still require 100%; leave the register
+                # alone until its own cycle has completed.
+                if self._weekly_charge_mgr.is_active():
+                    continue
+                original = self._tempo_original_cutoffs.get(
+                    name, self._weekly_charge_mgr._get_configured_max_soc(coordinator)
+                )
+                try:
+                    ok = await coordinator.set_charge_cutoff(original)
+                except Exception:
+                    _LOGGER.exception("Tempo: failed to restore %s cutoff", name)
+                    ok = False
+                if ok:
+                    self._tempo_cutoff_applied.discard(name)
+                    self._tempo_original_cutoffs.pop(name, None)
+                else:
+                    _LOGGER.warning("Tempo: will retry restoring %s cutoff", name)
 
     async def _handle_tempo_grid_charge(self) -> bool:
         """Use the protected predictive regulator for an EDF Tempo full charge.
@@ -9185,6 +9244,7 @@ class ChargeDischargeController:
         # Handle register writes and completion detection BEFORE predictive charging
         # This ensures weekly charge works regardless of active control mode
         await self._weekly_charge_mgr.handle_registers()
+        await self._reconcile_tempo_hardware_cutoffs()
 
         # === CHARGE DELAY: Daily reset and solar detection ===
         self._charge_delay_mgr.handle_daily_reset_and_eval()
