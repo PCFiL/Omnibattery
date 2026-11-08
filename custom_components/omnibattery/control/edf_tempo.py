@@ -136,9 +136,9 @@ def plan_tempo(now: datetime, snapshot: TempoSnapshot,
         charging = True
         deadline = datetime.combine(local.date(), time(6, 0), PARIS)
 
-    # The current 00:00-06:00 tariff belongs to the PREVIOUS Tempo day.
-    # Its precise color cannot be derived from EDF's today/tomorrow fields
-    # alone, so no price is claimed for this interval without history.
+    # The 00:00-06:00 tariff belongs to the PREVIOUS Tempo day.
+    # Without yesterday's verified color, report no price instead of making
+    # a false assumption that the just-started red day is already billable.
     price_key = None
     if time(6, 0) <= clock < time(22, 0) and today:
         price_key = f"{today}_hp"
@@ -159,6 +159,16 @@ def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) 
     """Publish a dashboard-only HA state. Does not change battery outputs."""
     snapshot = read_tempo_snapshot(hass, now)
     plan = plan_tempo(now, snapshot)
+    effective_price = plan.next_price_eur_kwh
+    if now.astimezone(PARIS).time() < time(6, 0):
+        yesterday = _state(
+            hass, "sensor.tarif_edf_tempo_30kva_tarif_tempo_couleur_hier"
+        )
+        yesterday_color = normalize_color(yesterday.state) if yesterday else None
+        effective_price = (
+            snapshot.prices.get(f"{yesterday_color}_hc")
+            if yesterday_color else None
+        )
     phase_batteries = []
     runtime = getattr(controller, "_phase_runtime", None)
     if runtime is not None:
@@ -183,7 +193,7 @@ def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) 
             "target_soc": plan.target_soc,
             "deadline": plan.deadline.isoformat() if plan.deadline else None,
             "red_peak": plan.is_red_peak,
-            "price_eur_kwh": plan.next_price_eur_kwh,
+            "price_eur_kwh": effective_price,
             "prices_eur_kwh": snapshot.prices,
             "warning": plan.warning,
             "mode": plan.mode,
