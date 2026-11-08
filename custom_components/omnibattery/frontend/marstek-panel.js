@@ -7415,9 +7415,20 @@ class MarstekVenusPanel extends HTMLElement {
       input.className = "ctl-select";
       input.style.maxWidth = "150px";
       input.addEventListener("change", () => {
-        if (!/^\\d{2}:\\d{2}$/.test(input.value)) return;
+        if (!/^\d{2}:\d{2}$/.test(input.value)) return;
+        input.dataset.pending = input.value;
         this._hass.callService("time", "set_value", {
           entity_id: id, time: input.value + ":00"
+        }).then(() => {
+          input.dataset.pending = "";
+          input.removeAttribute("title");
+        }).catch((err) => {
+          input.dataset.pending = "";
+          input.title = "Enregistrement refusé : " + String(err?.message || err);
+          const latest = this._hass?.states?.[id];
+          if (latest && /^\d{2}:\d{2}/.test(latest.state)) {
+            input.value = latest.state.slice(0, 5);
+          }
         });
       });
       frag.appendChild(input);
@@ -7481,7 +7492,7 @@ class MarstekVenusPanel extends HTMLElement {
       // gated feature switch: show/hide its sibling param rows when toggled
       if (w.gatedNodes) for (const n of w.gatedNodes) n.style.display = shown ? "" : "none";
     } else if (w.type === "time") {
-      if (!focused && /^\\d{2}:\\d{2}/.test(state.state)) w.el.value = state.state.slice(0, 5);
+      if (!focused && !w.el.dataset.pending && /^\d{2}:\d{2}/.test(state.state)) w.el.value = state.state.slice(0, 5);
     } else if (w.type === "select") {
       const opts = Array.isArray(state.attributes.options) ? state.attributes.options : [];
       const sig = opts.join("|");
