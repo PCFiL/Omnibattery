@@ -1220,6 +1220,7 @@ class ChargeDischargeController:
         # regulator and its meter/phase/battery protection, never direct writes.
         self.tempo_grid_charge_enabled = bool(config_entry.data.get("tempo_grid_charge_enabled", False))
         self._tempo_charge_active = False
+        self._tempo_red_peak_active = False
         self._tempo_plan = None
         self._tempo_last_active = False
 
@@ -3614,6 +3615,7 @@ class ChargeDischargeController:
         enabled = bool(self.config_entry.data.get("tempo_grid_charge_enabled", False))
         self.tempo_grid_charge_enabled = enabled
         self._tempo_charge_active = False
+        self._tempo_red_peak_active = False
         self._tempo_plan = None
         if not enabled:
             return
@@ -3621,6 +3623,9 @@ class ChargeDischargeController:
             now = dt_util.now()
             snapshot = read_tempo_snapshot(self.hass, now)
             self._tempo_plan = plan_tempo(now, snapshot)
+            self._tempo_red_peak_active = (
+                self._tempo_plan.is_red_peak and snapshot.warning is None
+            )
             self._tempo_charge_active = (
                 bool(self.predictive_charging_enabled)
                 and not self.predictive_charging_overridden
@@ -9211,7 +9216,16 @@ class ChargeDischargeController:
             return
 
         # === Predictive Grid Charging Logic (mode dispatch) ===
-        if self.predictive_charging_enabled:
+        # Red HP (06:00–22:00): never start tariff-driven grid charging.
+        # Normal PD remains free to absorb solar surplus and discharge for
+        # local consumption, respecting user-configured battery SOC floors.
+        if getattr(self, "_tempo_red_peak_active", False) and self.grid_charging_active:
+            self.grid_charging_active = False
+            self._grid_charging_initialized = False
+            self._predictive_charge_target_soc = None
+            self._current_price_slot_active = False
+            self._realtime_price_charging = False
+        if self.predictive_charging_enabled and not getattr(self, "_tempo_red_peak_active", False):
             if self.predictive_charging_mode == PREDICTIVE_MODE_DYNAMIC_PRICING:
                 await self._handle_dynamic_pricing_predictive_charging()
                 # Dynamic pricing falls through to normal PD control when not in a slot;
