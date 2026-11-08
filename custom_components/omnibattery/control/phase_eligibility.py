@@ -48,11 +48,11 @@ def classify_eligibility(
     if error_w > deadband_w:
         if discharge_blockers:
             return PhaseEligibility(False, "discharge_blocked:" + ",".join(sorted(discharge_blockers)))
-        if discharge_limit_w is None or discharge_limit_w <= 0:
+        if discharge_limit_w is None or not isfinite(discharge_limit_w) or discharge_limit_w <= 0:
             return PhaseEligibility(False, "discharge_power_limit")
         return PhaseEligibility(True, "can_discharge")
     if charge_blockers:
         return PhaseEligibility(False, "charge_blocked:" + ",".join(sorted(charge_blockers)))
-    if charge_limit_w is None or charge_limit_w <= 0:
+    if charge_limit_w is None or not isfinite(charge_limit_w) or charge_limit_w <= 0:
         return PhaseEligibility(False, "charge_power_limit")
     return PhaseEligibility(True, "can_charge")
