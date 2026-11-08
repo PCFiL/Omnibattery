@@ -18,7 +18,8 @@ MAX_WINDOW_S = 3600
 
 @dataclass
 class PhasePerformance:
-    samples: deque[tuple[float, float, float]] = field(default_factory=deque)
+    samples: deque[tuple[float, float, float, bool, str]] = field(default_factory=deque)
+    last_block_reason: str = "pd_disabled"
     last_sample_time: float | None = None
     last_source: str | None = None
     commands_accepted: int = 0
@@ -29,7 +30,8 @@ class PhasePerformance:
     complete_meter_losses: int = 0
 
     def observe(self, *, error_w: float | None, source: str, deadband_w: float,
-                enabled: bool, now: float | None = None) -> None:
+                enabled: bool, now: float | None = None,
+                eligible: bool = True, block_reason: str = "available") -> None:
         when = monotonic() if now is None else float(now)
         if not isfinite(when):
             raise ValueError("invalid timestamp")
@@ -42,6 +44,7 @@ class PhasePerformance:
                 self.complete_meter_losses += 1
             self.last_source = source
         self._trim(when)
+        self.last_block_reason = block_reason if enabled else "pd_disabled"
         if not enabled or error_w is None or not isfinite(error_w):
             return
         if not isfinite(deadband_w) or deadband_w < 0:
@@ -49,7 +52,7 @@ class PhasePerformance:
         # Keep at most one sample per second regardless of high-rate MQTT.
         if self.last_sample_time is not None and when - self.last_sample_time < 1:
             return
-        self.samples.append((when, float(error_w), float(deadband_w)))
+        self.samples.append((when, float(error_w), float(deadband_w), bool(eligible), block_reason))
         self.last_sample_time = when
         self._trim(when)
 
@@ -73,17 +76,36 @@ class PhasePerformance:
         self._trim(when)
         windows = {}
         for seconds in WINDOWS:
-            values = [(stamp, error, band) for stamp, error, band in self.samples
+            values = [(stamp, error, band, eligible, reason)
+                      for stamp, error, band, eligible, reason in self.samples
                       if 0 <= when - stamp <= seconds]
+            eligible_values = [v for v in values if v[3]]
             n = len(values)
+            m = len(eligible_values)
             span = (values[-1][0] - values[0][0]) if n > 1 else 0
+            reasons = {}
+            for _, _, _, eligible, reason in values:
+                if not eligible:
+                    reasons[reason] = reasons.get(reason, 0) + 1
             windows[str(seconds // 60)] = {
+                # Legacy fields retain the unfiltered grid performance.
                 "samples": n,
                 "coverage_s": round(span, 1),
-                "rms_error_w": round(sqrt(sum(v*v for _, v, _ in values) / n), 1) if n else None,
-                "mean_abs_error_w": round(sum(abs(v) for _, v, _ in values) / n, 1) if n else None,
-                "within_deadband_pct": round(100 * sum(abs(v) <= band for _, v, band in values) / n, 1) if n else None,
+                "rms_error_w": round(sqrt(sum(v[1]*v[1] for v in values) / n), 1) if n else None,
+                "mean_abs_error_w": round(sum(abs(v[1]) for v in values) / n, 1) if n else None,
+                "within_deadband_pct": round(100 * sum(abs(v[1]) <= v[2] for v in values) / n, 1) if n else None,
                 "complete": bool(n > 1 and span >= seconds * 0.9),
+                # Eligible-only performance excludes protective blocks but
+                # does not hide them: coverage and all exclusion counts remain.
+                "eligible_samples": m,
+                "excluded_samples": n - m,
+                "eligible_pct": round(100 * m / n, 1) if n else None,
+                "eligible_rms_error_w": round(sqrt(sum(v[1]*v[1] for v in eligible_values) / m), 1) if m else None,
+                "eligible_mean_abs_error_w": round(sum(abs(v[1]) for v in eligible_values) / m, 1) if m else None,
+                "eligible_within_deadband_pct": round(
+                    100 * sum(abs(v[1]) <= v[2] for v in eligible_values) / m, 1
+                ) if m else None,
+                "excluded_reasons": reasons,
             }
         return {
             "windows": windows,
@@ -94,6 +116,7 @@ class PhasePerformance:
             "failovers": self.failovers,
             "complete_meter_losses": self.complete_meter_losses,
             "source": self.last_source,
+            "block_reason": self.last_block_reason,
             "reset_on_restart": True,
         }
 
