@@ -848,7 +848,8 @@
           "capacity_protection": "Protection de capacité",
           "pd_advanced": "Contrôleur PD (avancé)",
           "hourly_balance": "Bilan horaire net",
-          "phase_pd": "Régulation PD triphasée (L1/L2/L3)"
+          "phase_pd": "Régulation PD triphasée (L1/L2/L3)",
+          "edf_tempo": "EDF Tempo — charge avant jours rouges"
         }
       },
       "sensors": {
@@ -1493,6 +1494,13 @@
           "kd": "Gain dérivé : réaction à la vitesse de variation de l’erreur. Commencez à 0 pour éviter d’amplifier le bruit de mesure.",
           "fallback_grid_sensor": "Capteur de puissance (W ou kW) utilisé uniquement si le capteur principal est indisponible, invalide ou périmé depuis plus de 15 secondes. Doit mesurer la même phase avec le même signe : positif = importation."
         }
+      },
+      "edf_tempo": {
+        "title": "EDF Tempo — charge avant les jours rouges",
+        "description": "Activer la recharge à 100 % pendant les heures creuses précédant une journée rouge. Les capteurs EDF Tempo, RTE, la charge prédictive et la régulation des phases doivent être opérationnels. Fonction désactivée par défaut.",
+        "data": {
+          "tempo_grid_charge_enabled": "Autoriser la charge réseau automatique Tempo"
+        }
       }
     },
     "error": {
@@ -1544,7 +1552,9 @@
       "fallback_same_as_primary": "Les capteurs principal et secondaire doivent être différents.",
       "invalid_fallback_sensor": "Sélectionnez une entité sensor valide.",
       "duplicate_fallback_sensor": "Un capteur secondaire est affecté plusieurs fois.",
-      "sensor_reused_across_phases": "Un capteur est utilisé sur plusieurs phases."
+      "sensor_reused_across_phases": "Un capteur est utilisé sur plusieurs phases.",
+      "tempo_sources_missing": "Les capteurs EDF Tempo et RTE sont introuvables.",
+      "tempo_predictive_disabled": "Activez d’abord la charge prédictive dans Omnibattery."
     },
     "abort": {
       "phase_pd_disable_first": "Désactivez tous les contrôleurs PD de phase avant de modifier les affectations.",
