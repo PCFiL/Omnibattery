@@ -269,6 +269,7 @@ from .tracking.daily_timeline import (
 )
 from .control.pack_soc import control_vmax, soc_vs_ceiling, soc_vs_floor
 from .control.weekly_full_charge import WeeklyFullChargeManager
+from .control.edf_tempo import read_tempo_snapshot, plan_tempo
 from .control.max_soc_charge import MaxSocChargeManager
 from .control.temperature_limit import TemperatureChargeLimitManager
 from .control.phase_power_limit import PhasePowerLimiter
@@ -1214,6 +1215,13 @@ class ChargeDischargeController:
             "adjusted_target": None,
         }
         self._capacity_protection_force_idle = False
+
+        # Tempo priority is opt-in. It reuses the existing predictive charging
+        # regulator and its meter/phase/battery protection, never direct writes.
+        self.tempo_grid_charge_enabled = bool(config_entry.data.get("tempo_grid_charge_enabled", False))
+        self._tempo_charge_active = False
+        self._tempo_plan = None
+        self._tempo_last_active = False
 
         # Weekly Full Charge state
         self.weekly_full_charge_enabled = config_entry.data.get(CONF_ENABLE_WEEKLY_FULL_CHARGE, False)
@@ -3601,8 +3609,77 @@ class ChargeDischargeController:
                     coordinator=coordinator,
                 )
 
+    def _refresh_tempo_control_state(self) -> None:
+        """Evaluate Tempo on every cycle; never treat an unknown day as red."""
+        enabled = bool(self.config_entry.data.get("tempo_grid_charge_enabled", False))
+        self.tempo_grid_charge_enabled = enabled
+        self._tempo_charge_active = False
+        self._tempo_plan = None
+        if not enabled:
+            return
+        try:
+            now = dt_util.now()
+            snapshot = read_tempo_snapshot(self.hass, now)
+            self._tempo_plan = plan_tempo(now, snapshot)
+            self._tempo_charge_active = (
+                bool(self.predictive_charging_enabled)
+                and not self.predictive_charging_overridden
+                and self._tempo_plan.mode == "charge_before_red"
+                and snapshot.warning is None
+            )
+        except Exception:
+            _LOGGER.exception("Tempo: unable to read validated EDF/RTE data")
+
+    async def _handle_tempo_grid_charge(self) -> bool:
+        """Use the protected predictive regulator for an EDF Tempo full charge.
+
+        True means Tempo owns this cycle (including when SOC already reached).
+        No manual battery or blocked battery is bypassed.
+        """
+        if not self._tempo_charge_active:
+            if self._tempo_last_active:
+                self._tempo_last_active = False
+                self.grid_charging_active = False
+                self._grid_charging_initialized = False
+                self._predictive_charge_target_soc = None
+                # Return control to the normal planner in this same cycle.
+                _LOGGER.info("Tempo: charge window ended, releasing predictive control")
+            return False
+
+        if self.is_charge_blocked():
+            _LOGGER.debug("Tempo: charge forbidden by %s", self.get_charge_blockers())
+            return False
+
+        eligible = self._get_available_batteries(is_charging=True)
+        if not eligible:
+            # Battery completion, manual ownership, disconnected batteries or
+            # protection blockers all mean no new grid-charge command.
+            if self._tempo_last_active:
+                for c in self.coordinators:
+                    if not self._is_battery_manual_owned(c):
+                        await self._set_battery_power(c, 0, 0)
+            self._tempo_last_active = False
+            self.grid_charging_active = False
+            self._grid_charging_initialized = False
+            return True
+
+        if not self._tempo_last_active:
+            _LOGGER.info("Tempo: starting safeguarded grid charge to 100%%")
+            self._grid_charging_initialized = False
+            self._predictive_charge_target_soc = None
+            self._tempo_last_active = True
+            # In the present cycle Tempo owns the other predictive price modes.
+            self._current_price_slot_active = False
+            self._realtime_price_charging = False
+
+        self.grid_charging_active = True
+        await self._handle_predictive_grid_charging()
+        return True
+
     def _weekly_full_charge_unlocked(self) -> bool:
         """Return True when charging to 100% should bypass configured max SOC."""
+        if getattr(self, "_tempo_charge_active", False):
+            return True
         weekly_charge_active = self._weekly_charge_mgr.is_active()
         return weekly_charge_active and (
             not self.charge_delay_enabled
@@ -3637,6 +3714,8 @@ class ChargeDischargeController:
         planner stopping at max_soc and the weekly routine waiting for solar
         that may never arrive.
         """
+        if getattr(self, "_tempo_charge_active", False):
+            return 100.0
         if ChargeDischargeController._weekly_full_charge_pending(self):
             return 100.0
         return float(coordinator.max_soc)
@@ -4061,6 +4140,7 @@ class ChargeDischargeController:
         """Refresh all runtime operation blockers for the current control cycle."""
         if (
             self.charge_delay_enabled
+            and not getattr(self, "_tempo_charge_active", False)
             and self._charge_delay_mgr.is_charge_delayed()
         ):
             self.set_charge_block(
@@ -6262,7 +6342,13 @@ class ChargeDischargeController:
         # evaluated.  This prevents a battery that already reached its
         # opportunistic target from receiving even the first control-cycle
         # command while another battery still needs charge.
-        if (
+        if getattr(self, "_tempo_charge_active", False):
+            # Mandatory 100% deadline, independent of forecast deficit.
+            self._predictive_charge_target_soc = {
+                c: 100.0 for c in self.coordinators
+                if c.data is not None and not self._is_battery_manual_owned(c)
+            }
+        elif (
             not self._grid_charging_initialized
             or self._predictive_charge_target_soc is None
         ):
@@ -9075,6 +9161,10 @@ class ChargeDischargeController:
         if apply_manual_setpoints is not None:
             await apply_manual_setpoints(global_mode=False)
 
+        # Evaluate once per cycle before blockers/ceiling logic. Red/unknown
+        # data can never create a guessed charging event.
+        self._refresh_tempo_control_state()
+
         # === WEEKLY FULL CHARGE REGISTER MANAGEMENT ===
         # Handle register writes and completion detection BEFORE predictive charging
         # This ensures weekly charge works regardless of active control mode
@@ -9113,6 +9203,11 @@ class ChargeDischargeController:
             self.sign_changes = 0
             self._active_discharge_batteries = []
             self._active_charge_batteries = []
+            return
+
+        # Tempo gets first opportunity during 22:00–06:00 before a red day.
+        # The existing predictive handler owns actual per-phase dispatch.
+        if await self._handle_tempo_grid_charge():
             return
 
         # === Predictive Grid Charging Logic (mode dispatch) ===
@@ -11271,7 +11366,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         def _publish_tempo(_now=None):
             try:
-                publish_tempo_diagnostics(hass, dt_util.now())
+                publish_tempo_diagnostics(hass, dt_util.now(), controller)
             except Exception:
                 _LOGGER.exception("EDF Tempo diagnostic refresh failed")
 
