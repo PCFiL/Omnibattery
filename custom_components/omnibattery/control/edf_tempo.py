@@ -179,6 +179,10 @@ def publish_tempo_diagnostics(hass: Any, now: datetime, controller: Any = None) 
                 "phase": phase,
                 "name": channel.battery_key,
                 "soc": data.get("battery_soc"),
+                "predictive_target_soc": (
+                    (getattr(controller, "_phase_predictive_targets", {}) or {})
+                    .get(channel.battery_key)
+                ),
                 "safety": runtime.safety_status.get(phase),
             })
 
