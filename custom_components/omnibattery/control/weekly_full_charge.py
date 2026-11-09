@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers.storage import Store
@@ -28,6 +29,7 @@ from .weekly_charge_window import (
 
 from .pack_soc import control_vmax, soc_vs_ceiling
 from ..const import (
+    DISCHARGE_ENGAGE_GRACE_S,
     DOMAIN,
     NORMAL_BALANCE_BMS_CUTOFF_VERSIONS,
     NORMAL_BALANCE_RECAL_CUTOFF_CYCLES,
@@ -45,10 +47,15 @@ _LOGGER = logging.getLogger(__name__)
 _INVERTER_STATE_STANDBY = 1
 # Battery power below this (W) is treated as "not charging" for BMS-cutoff detection.
 _BMS_CUTOFF_POWER_W = 10
-# Consecutive update cycles (~2 s each) of BMS-cutoff conditions required before
-# declaring completion at 99%. Keep this shared with the Venus A/D retry-acceptance
-# debounce: 5 × 2 s = 10 s outlasts the Modbus response delay while reacting quickly.
+# Refusal samples (one per control cycle) required before declaring completion at
+# 99%. Keep this shared with the Venus A/D retry-acceptance debounce.
 _BMS_CUTOFF_REQUIRED_CYCLES = NORMAL_BALANCE_RECAL_CUTOFF_CYCLES
+# A cutoff is also confirmed no sooner than this many seconds after its first
+# refusal sample. The control cycle runs on every meter sample and on the 2s
+# safety tick, so the sample count alone can pass within about 3s. Timed on the
+# controller's clock, not by reading age: a driver that serves a cached device
+# state makes every poll look fresh.
+_BMS_CUTOFF_CONFIRM_S = 10
 
 
 class WeeklyFullChargeManager:
@@ -132,7 +139,17 @@ class WeeklyFullChargeManager:
             tick_retry_acceptance()
         # Consecutive accepted-charge samples that must precede a counter reset.
         accept_counts = self.__dict__.setdefault("_bms_accept_counts", {})
+        # When each battery's current charge command started, and when its
+        # current run of refusal samples started (monotonic seconds).
+        charge_commanded_at = self.__dict__.setdefault("_bms_charge_commanded_at", {})
+        first_refusal_at = self.__dict__.setdefault("_bms_cutoff_first_at", {})
+        now = monotonic()
         for c in ctrl.coordinators:
+            commanded = getattr(c, "commanded_charge_power", 0) or 0
+            if commanded > _BMS_CUTOFF_POWER_W:
+                charge_commanded_at.setdefault(c.name, now)
+            else:
+                charge_commanded_at.pop(c.name, None)
             if getattr(c, "battery_manual_mode_enabled", False):
                 # Individual manual mode owns the battery. Freeze its cutoff
                 # evidence so weekly charge cannot classify or reconfigure it.
@@ -165,7 +182,6 @@ class WeeklyFullChargeManager:
                 # without being full. Gating on the commanded setpoint is what
                 # separates a real BMS cut from "nobody asked it to charge", and
                 # stops an idle battery from racking up cutoff cycles forever.
-                commanded = getattr(c, "commanded_charge_power", 0) or 0
                 cutoff = (
                     power is not None
                     and commanded > _BMS_CUTOFF_POWER_W
@@ -178,9 +194,23 @@ class WeeklyFullChargeManager:
                         or (is_zendure and inv_state is None and soc >= 99)
                     )
                 )
+                if cutoff and now - charge_commanded_at[c.name] < self._engage_grace_s(c):
+                    # A battery starting from standby reads ≤10 W + Standby until it
+                    # engages, which can take well over 10s, and its readings may
+                    # predate the command. Neither proves a cutoff: freeze the
+                    # counter until the engage grace has passed.
+                    continue
                 if cutoff:
                     accept_counts.pop(c.name, None)
                     count = self._bms_cutoff_counts.get(c.name, 0) + 1
+                    if count == 1 or c.name not in first_refusal_at:
+                        first_refusal_at[c.name] = now
+                    refusing_s = now - first_refusal_at[c.name]
+                    if count == _BMS_CUTOFF_REQUIRED_CYCLES and refusing_s < _BMS_CUTOFF_CONFIRM_S:
+                        # Enough samples but not enough time: hold one short of
+                        # confirmation, so a count at the threshold still means
+                        # confirmed for every reader.
+                        count -= 1
                     self._bms_cutoff_counts[c.name] = count
                     if count == 1:
                         _LOGGER.info(
@@ -190,9 +220,9 @@ class WeeklyFullChargeManager:
                         )
                     elif count == _BMS_CUTOFF_REQUIRED_CYCLES:
                         _LOGGER.info(
-                            "%s: BMS cutoff confirmed at %d%% (%d cycles at ≤%.0fW + Standby "
-                            "while commanded to charge)",
-                            c.name, soc, count, _BMS_CUTOFF_POWER_W,
+                            "%s: BMS cutoff confirmed at %d%% (%d cycles over %.0fs at ≤%.0fW + "
+                            "Standby while commanded to charge)",
+                            c.name, soc, count, refusing_s, _BMS_CUTOFF_POWER_W,
                         )
                 elif power is not None and power > _BMS_CUTOFF_POWER_W:
                     # Battery is accepting charge → genuinely not full, but only
@@ -219,6 +249,14 @@ class WeeklyFullChargeManager:
             else:
                 self._bms_cutoff_counts[c.name] = 0
                 accept_counts.pop(c.name, None)
+
+    @staticmethod
+    def _engage_grace_s(coordinator: Any) -> float:
+        """Return how long a new charge command may go undelivered while engaging."""
+        engage_grace_s = getattr(
+            getattr(coordinator, "capabilities", None), "engage_grace_s", None
+        )
+        return DISCHARGE_ENGAGE_GRACE_S if engage_grace_s is None else engage_grace_s
 
     def reset_bms_cutoff_confirmation(self, coordinator: Any) -> None:
         """Forget a provisional cutoff before the one-shot retry begins."""
@@ -271,15 +309,57 @@ class WeeklyFullChargeManager:
         """Return only the debounced BMS-cutoff state, independent of SOC."""
         return self._bms_cutoff_counts.get(coordinator.name, 0) >= _BMS_CUTOFF_REQUIRED_CYCLES
 
+    def _sunrise_on(self, day: date) -> datetime | None:
+        """Local sunrise on ``day`` (naive), or None when it cannot be told."""
+        tracker = getattr(self._controller, "_consumption_tracker", None)
+        calculate = getattr(tracker, "calculate_sunrise", None)
+        if not callable(calculate):
+            return None
+        try:
+            hours = calculate(day)
+        except Exception:  # noqa: BLE001
+            return None
+        if hours is None:
+            return None
+        return datetime.combine(day, datetime.min.time()) + timedelta(hours=float(hours))
+
+    def window_end(self, now: datetime) -> datetime | None:
+        """When the current charge window ends: the sunrise after the target day.
+
+        The remaining gap is bought after the target day's sun has set, so the
+        cheap hours of the night after it belong to the same run. Without a
+        known sunrise the window ends at midnight, as it always did. Returned in
+        ``now``'s timezone (naive for a naive ``now``); None outside the window.
+        """
+        target_weekday = WEEKDAY_MAP[self._controller.weekly_full_charge_day]
+        local = now.replace(tzinfo=None) if now.tzinfo else now
+        if local.weekday() == target_weekday:
+            day_after = local.date() + timedelta(days=1)
+        elif self.in_overnight_extension(local):
+            day_after = local.date()
+        else:
+            return None
+        end = self._sunrise_on(day_after) or datetime.combine(day_after, datetime.min.time())
+        return end.replace(tzinfo=now.tzinfo) if now.tzinfo else end
+
+    def in_overnight_extension(self, now: datetime) -> bool:
+        """True in the night after the target day, before its sunrise."""
+        target_weekday = WEEKDAY_MAP[self._controller.weekly_full_charge_day]
+        local = now.replace(tzinfo=None) if now.tzinfo else now
+        if local.weekday() != (target_weekday + 1) % 7:
+            return False
+        end = self._sunrise_on(local.date())
+        return end is not None and local < end
+
     def is_active(self) -> bool:
         """Check if weekly full charge is currently active.
 
         Returns True if:
         - Feature is enabled
-        - Today is the selected day
+        - It is the selected day, or the night after it before sunrise
         - NOT all batteries have reached 100% yet
 
-        Also handles day boundary transitions to reset the flag.
+        Also handles the end of that window to reset the flags.
         """
         ctrl = self._controller
         if not ctrl.weekly_full_charge_enabled:
@@ -446,6 +526,24 @@ class WeeklyFullChargeManager:
                 continue
             if 0 <= value_int <= 100:
                 saved[str(name)] = value_int
+
+    @staticmethod
+    def _original_max_soc(coordinator: Any) -> int:
+        """The ceiling to restore after the run.
+
+        A battery that reports its own Target SOC (Zendure: ``socSet``) is
+        restored to what it reported before the raise. The integration's stored
+        config may be older, because the device's own Target SOC entity writes
+        only the device.
+        """
+        if "soc_set" in (getattr(coordinator, "data", None) or {}):
+            try:
+                live = int(getattr(coordinator, "max_soc", 100))
+            except (TypeError, ValueError):
+                live = 100
+            if 0 < live < 100:
+                return live
+        return WeeklyFullChargeManager._get_configured_max_soc(coordinator)
 
     @staticmethod
     def _get_configured_max_soc(coordinator: Any) -> int:
@@ -622,7 +720,7 @@ class WeeklyFullChargeManager:
                     # setdefault preserves the value restored from storage after HA
                     # restarts, when the live poll already reports 100%.
                     ctrl._weekly_charge_saved_max_soc.setdefault(
-                        coordinator.name, self._get_configured_max_soc(coordinator)
+                        coordinator.name, self._original_max_soc(coordinator)
                     )
                     # Raise the hardware charging cutoff to 100%
                     ok = await coordinator.set_charge_cutoff(100)
@@ -803,6 +901,7 @@ class WeeklyFullChargeManager:
                 coordinator._hysteresis_active = True
                 current_soc = coordinator.data.get("battery_soc", 100) if coordinator.data else 100
                 coordinator._hysteresis_base_soc = current_soc
+                coordinator._hysteresis_latch_max_soc = coordinator.max_soc
                 _LOGGER.debug(
                     "%s: Re-enabled hysteresis after weekly full charge (base SOC: %.1f%%)",
                     coordinator.name,
