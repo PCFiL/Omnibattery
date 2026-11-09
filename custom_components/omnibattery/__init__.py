@@ -6482,10 +6482,16 @@ class ChargeDischargeController:
                     target_soc = min(
                         float(self._charge_ceiling_soc(coord)), float(target)
                     )
-                    actual_soc = float(coord.data.get("battery_soc", 0))
-                except (ValueError, TypeError, AttributeError):
+                    actual_soc = float(coord.data["battery_soc"])
+                except (KeyError, ValueError, TypeError, AttributeError):
                     continue
-                if math.isfinite(target_soc) and math.isfinite(actual_soc) and target_soc > actual_soc + 0.2:
+                if (
+                    math.isfinite(target_soc)
+                    and math.isfinite(actual_soc)
+                    and 0.0 <= actual_soc <= 100.0
+                    and 0.0 <= target_soc <= 100.0
+                    and target_soc > actual_soc + 0.2
+                ):
                     self._phase_predictive_targets[coord.name] = target_soc
 
         # Get available batteries (respecting the active target and max_soc)
