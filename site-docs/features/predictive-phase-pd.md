@@ -11,6 +11,20 @@ SOC targets** to each phase owner.
   mode has authorised a grid-charging slot and calculated a pending SOC target.
 - **Normal phase PD**: controls surplus absorption/house supply otherwise.
 
+## EDF Tempo off-peak window (hard constraint)
+
+All automatic **predictive grid charging** is restricted to local
+`Europe/Paris` hours **22:00 inclusive to 06:00 exclusive**, regardless of
+a wider user-configured Time Slot, Dynamic Pricing or Real-Time Price period.
+An overnight Time Slot belongs to the configured weekday when it STARTS:
+Monday 22:00–Tuesday 06:00 remains Monday's charging window until 06:00.
+When the HC window closes or a predictive SOC target is reached, Phase PD
+stops the residual grid-charge setpoint, then resumes normal solar-surplus
+regulation.
+
+The independent weekly full-charge window retains its own user-configured
+hours. Mandatory pre-red Tempo charging already uses 22:00–06:00.
+
 The phase dispatcher remains the **only hardware writer** for phase-managed
 Zendure batteries. It uses fresh phase and global Shelly meter readings, the
 configured per-phase import cap (same as the Tempo cap), contracted import
