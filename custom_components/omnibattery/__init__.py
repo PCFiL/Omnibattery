@@ -1013,6 +1013,10 @@ class ChargeDischargeController:
         self._last_chronological_diagnostics = None
         self._slot_entry_time = None  # When we first entered the time slot (for 5-min delay)
         self._predictive_charge_target_soc: Optional[dict] = None  # Per-battery grid-only SOC targets {coordinator: target_%}
+        # Read-only target handoff from the existing solar-aware pricing engine
+        # to batteries exclusively owned by PhaseRuntime. No direct power writes.
+        self._phase_predictive_targets: dict[str, float] = {}
+
         self._active_time_slot_quota_kwh: Optional[float] = None
         self._time_slot_chronological_plan = None
         self._time_slot_chronological_preview_date = None
@@ -6447,8 +6451,38 @@ class ChargeDischargeController:
         ):
             self._predictive_charge_target_soc = self._compute_predictive_target_soc()
 
+        # The normal global dispatcher must not command Phase PD-owned batteries.
+        # Preserve the planner's own energy-deficit SOC targets and publish them
+        # to PhaseRuntime, which remains the exclusive per-phase power writer.
+        phase_runtime = getattr(self, "_phase_runtime", None)
+        self._phase_predictive_targets = {}
+        if (
+            phase_runtime is not None
+            and self.predictive_charging_enabled
+            and not self.predictive_charging_overridden
+            and self.grid_charging_active
+            and isinstance(self._predictive_charge_target_soc, dict)
+        ):
+            for coord, target in self._predictive_charge_target_soc.items():
+                if coord.name not in phase_runtime.active_batteries or not coord.data:
+                    continue
+                try:
+                    target_soc = min(
+                        float(self._charge_ceiling_soc(coord)), float(target)
+                    )
+                    actual_soc = float(coord.data.get("battery_soc", 0))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if math.isfinite(target_soc) and math.isfinite(actual_soc) and target_soc > actual_soc + 0.2:
+                    self._phase_predictive_targets[coord.name] = target_soc
+
         # Get available batteries (respecting the active target and max_soc)
         available_batteries = self._get_available_batteries(is_charging=True)
+        if not available_batteries and self._phase_predictive_targets:
+            # All chargeable batteries are phase-owned. Keep the price/time
+            # slot active; PhaseRuntime will enforce SOC, BMS, phase and global
+            # import limits in the finally-dispatch of this same control cycle.
+            return
         if not available_batteries:
             _LOGGER.info(
                 "Predictive charging complete: all batteries reached their active SOC target"
