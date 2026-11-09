@@ -5748,8 +5748,8 @@ class ChargeDischargeController:
         even when a user configured a wider predictive time slot.
         """
         from datetime import time as dt_time
-        from .control.edf_tempo import is_tempo_offpeak
-        now = dt_util.now()
+        from .control.edf_tempo import PARIS, is_tempo_offpeak
+        now = dt_util.now().astimezone(PARIS)
         if not is_tempo_offpeak(now):
             return None
         current_time = now.time().replace(tzinfo=None)
