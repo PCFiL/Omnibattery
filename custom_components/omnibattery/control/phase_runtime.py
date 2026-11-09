@@ -272,6 +272,41 @@ class PhaseRuntime:
                 # in this very cycle (global meter reading may not update yet).
                 remaining = float(ctl._predictive_charge_ceiling()) - float(global_power)
                 remaining -= getattr(self, "_tempo_reserved_increment_w", 0.0)
+
+                # A phase previously discharging at -X W would increase grid
+                # import by X W just by stopping discharge. Never send +charge
+                # directly from -discharge based on charge-only headroom.
+                # Stop first, wait for a fresh meter sample and ramp charging
+                # in a later controller cycle.
+                old_signed_w = float(prior.last_command_w)
+                if old_signed_w < 0:
+                    phase_headroom = float(
+                        ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500)
+                    ) - float(selected.reading.power_w)
+                    release_w = abs(old_signed_w)
+                    if min(phase_headroom, remaining) < release_w:
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_waiting_discharge_release_headroom"
+                        )
+                        continue
+                    stopped = await ctl._set_battery_power(
+                        battery, 0, 0, owner=f"phase:{phase}"
+                    )
+                    if stopped:
+                        self.manager.acknowledge(phase, 0, now=now)
+                        self._tempo_reserved_increment_w = (
+                            getattr(self, "_tempo_reserved_increment_w", 0.0)
+                            + release_w
+                        )
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_discharge_stopped_before_charge"
+                        )
+                    else:
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_discharge_stop_unconfirmed"
+                        )
+                    continue
+
                 soc = float(battery.data.get("battery_soc", 0) or 0)
                 bms_full = bool(
                     weekly_manager is not None
