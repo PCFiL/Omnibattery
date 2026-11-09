@@ -25,8 +25,6 @@ Omnibattery utiliza su sensor de energía de la red para decidir cuánto deben c
 
 ![Seleccione los principales sensores Omnibattery](../assets/screenshots/configuration/main-sensor.png){ width="600" style="display: block; margin: 0 auto;"}
 
-!!! warning "La captura de pantalla necesita actualizarse"
-    El formulario actual también incluye campos separados de pronóstico del día restante, medidor fuera de la red y protección trifásica que no son visibles en esta captura de pantalla.
 
 ## lo que veras
 
