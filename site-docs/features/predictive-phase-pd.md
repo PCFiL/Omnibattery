@@ -18,16 +18,22 @@ limit, thermal/BMS protections, and manual ownership exclusions. Predictive
 targets remain fixed during a slot unless the existing forecasting engine
 explicitly re-evaluates them.
 
-## Forecast horizon caveat
+## Tomorrow's weather in blue/white Tempo
 
-This change **connects the existing predictive energy balance to Phase PD**.
-It does *not* create a new next-day solar forecast source. In particular,
-the Time Slot engine's current-horizon energy calculation may end at local
-midnight, rather than including tomorrow's daylight production. For a
-strict *tomorrow* forecast optimisation, use a provider supplying dated
-future solar forecast periods and extend the pricing engine horizon in a
-separate, tested change. Do not assume today's scalar forecast equals
-tomorrow's production.
+When the Time Slot engine evaluates an evening (18:00 or later) before
+a **confirmed blue or white** Tempo day, it can include tomorrow's
+daylight production **if and only if** the configured solar forecast entity
+supplies real, timestamped `solar_forecast_periods` / `forecast_periods` /
+`periods` covering tomorrow's noon. The consumption horizon extends
+through tomorrow 22:00, and the energy from the dated periods is prorated
+over that horizon.
+
+When no such dated future solar forecast is available, the existing
+same-day prediction remains authoritative. A scalar sensor that reports
+today's forecast must never be mistaken for tomorrow's production. In
+that case, next-day weather optimisation is *not available*, and the
+diagnostics should be interpreted accordingly. This change does not add
+a new weather provider.
 
 ## Testing
 
