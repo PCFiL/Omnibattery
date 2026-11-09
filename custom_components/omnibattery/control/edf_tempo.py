@@ -44,6 +44,18 @@ class TempoPlan:
     warning: str | None
 
 
+def is_tempo_offpeak(now: datetime) -> bool:
+    """EDF Tempo HC: 22:00 inclusive to 06:00 exclusive, Europe/Paris.
+
+    Uses aware datetimes, not controller host-local time. Exactly 06:00
+    falls in HP; daylight saving changes use local wall-clock boundaries.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Tempo off-peak check requires timezone-aware datetime")
+    clock = now.astimezone(PARIS).time()
+    return clock >= time(22, 0) or clock < time(6, 0)
+
+
 def normalize_color(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
