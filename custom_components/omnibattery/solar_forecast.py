@@ -539,9 +539,12 @@ def read_solar_forecast_kwh(
                 source,
                 sensor,
                 periods=(
-                    _arome_dated_periods(hass, sensor)
+                    (_arome_dated_periods(hass, sensor) or _extract_forecast_periods(state))
                     if "arome_solar_forecast" in sensor
-                    else _extract_forecast_periods(state)
+                    else (
+                        _extract_forecast_periods(state)
+                        or _energy_dashboard_periods(hass, controller, sensor)
+                    )
                 ),
                 conversion="none",
             )
