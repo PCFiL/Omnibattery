@@ -6479,9 +6479,13 @@ class ChargeDischargeController:
         # Get available batteries (respecting the active target and max_soc)
         available_batteries = self._get_available_batteries(is_charging=True)
         if not available_batteries and self._phase_predictive_targets:
-            # All chargeable batteries are phase-owned. Keep the price/time
-            # slot active; PhaseRuntime will enforce SOC, BMS, phase and global
-            # import limits in the finally-dispatch of this same control cycle.
+            # A phase-only fleet must retain the original price-plan SOC
+            # ceilings across subsequent 2-second control cycles. Otherwise
+            # each cycle recomputes a new target relative to the freshly
+            # increased SOC and the charging goal moves indefinitely.
+            self._grid_charging_initialized = True
+            # PhaseRuntime (and only PhaseRuntime) writes these batteries in
+            # the finally-dispatch, under the existing power/meter guards.
             return
         if not available_batteries:
             _LOGGER.info(
