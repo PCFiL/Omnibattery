@@ -367,12 +367,12 @@ class PhaseRuntime:
                     self.safety_status[phase] = f"{forced_charge_mode}_charge_command_unconfirmed"
                 continue
 
-            # At the exact end of the off-peak predictive interval, release the
-            # last grid charge command before normal daytime Phase PD may act.
-            # It can absorb fresh solar surplus again in a subsequent cycle.
+            # Release an outstanding predictive grid command as soon as its
+            # SOC target is met, the forecast plan is withdrawn, or 06:00
+            # closes the HC window. Normal solar-surplus PD resumes next cycle.
             state = self.manager.planner.states[channel.battery_key]
             if (
-                not predictive_offpeak
+                not predictive_pending
                 and self._last_grid_charge_owner.get(phase) == "predictive"
             ):
                 if state.last_command_w > 0:
@@ -380,11 +380,11 @@ class PhaseRuntime:
                         battery, 0, 0, owner=f"phase:{phase}", force_write=True
                     )
                     if not stopped:
-                        self.safety_status[phase] = "predictive_hc_end_stop_unconfirmed"
+                        self.safety_status[phase] = "predictive_release_stop_unconfirmed"
                         continue
                     self.manager.acknowledge(phase, 0, now=now)
                 self._last_grid_charge_owner.pop(phase, None)
-                self.safety_status[phase] = "predictive_hc_end_released"
+                self.safety_status[phase] = "predictive_released"
                 continue
 
             # Hard handover at 06:00 on red days: remove any residual
