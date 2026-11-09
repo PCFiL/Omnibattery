@@ -22,6 +22,7 @@ class FakeController:
             last_reported=datetime.now(timezone.utc),
         )))
         self.manual_mode_enabled = False
+        self.ev_charging_pause_enabled = False
         self.writes = []
 
     def _is_battery_manual_owned(self, c): return False
@@ -76,7 +77,7 @@ async def test_weekly_full_charge_commands_grid_import_via_phase_owner():
     ctl._sensor_is_within_stale_tolerance = lambda stamp: True
     ctl._predictive_charge_ceiling = lambda: 7500
     runtime = PhaseRuntime(ctl)
-    await runtime.run()  # startup: zero safety write
+    await runtime.run()
     runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
     await runtime.run()
     assert ctl.writes[-1][0] == "mix_ac_1"

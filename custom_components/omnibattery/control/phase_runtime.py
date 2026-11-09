@@ -94,6 +94,17 @@ class PhaseRuntime:
         tracker = data.get("phase_performance")
         return tracker.phase(phase) if tracker is not None else None
 
+    def _invalidate_stop_ack(self, phase):
+        """A nonzero attempt invalidates a previous stop, even if its ACK fails.
+
+        A failed acknowledgement does not prove the request never reached the
+        inverter. The next safety stop must be an actual write, not reuse the
+        startup stop or wait for its 30-second reassertion interval.
+        """
+        self._stop_confirmed.discard(phase)
+        self._last_stop_attempt.pop(phase, None)
+        self._last_stop_ack.pop(phase, None)
+
     async def _force_zero(self, channel, battery, *, now):
         """Demand 0W/0W at the existing guarded, serialized write boundary.
 
@@ -226,6 +237,33 @@ class PhaseRuntime:
                 max_charge = 0
             if ctl.get_discharge_blockers(battery):
                 max_discharge = 0
+
+            # Apply safety reductions before either normal PD deadband/pacing
+            # or forced-grid-charge pacing can retain an obsolete setpoint.
+            prior = self.manager.planner.states[channel.battery_key]
+            old_command = prior.last_command_w
+            limited = max(-max_discharge, min(max_charge, old_command))
+            if limited != old_command:
+                if limited == 0:
+                    ok = await self._force_zero(channel, battery, now=now)
+                else:
+                    self._invalidate_stop_ack(phase)
+                    ok = await ctl._set_battery_power(
+                        battery, max(0, limited), max(0, -limited),
+                        owner=f"phase:{phase}", force_write=True,
+                    )
+                    if ok:
+                        self.manager.acknowledge(phase, limited, now=now)
+                # Reducing discharge increases import. Reserve that attempted
+                # increase even on an uncertain ACK; never credit an unmeasured
+                # charge reduction as spare headroom for the following phases.
+                self._tempo_reserved_increment_w += max(0.0, limited - old_command)
+                self.safety_status[phase] = (
+                    "power_limit_command_accepted" if ok
+                    else "power_limit_command_unconfirmed"
+                )
+                continue
+
             # Phase PD is the EXCLUSIVE power writer for these batteries.
             # Both Tempo and weekly full charge require explicit grid energy;
             # merely raising the SOC ceiling does not command any watts.
@@ -353,6 +391,8 @@ class PhaseRuntime:
                 if request == last:
                     self.safety_status[phase] = f"{forced_charge_mode}_no_change"
                     continue
+                if request != 0:
+                    self._invalidate_stop_ack(phase)
                 ok = await ctl._set_battery_power(
                     battery, request, 0, owner=f"phase:{phase}",
                 )
@@ -409,6 +449,8 @@ class PhaseRuntime:
             if proposed is None:
                 self.safety_status[phase] = "normal_no_change"
                 continue
+            if proposed != 0:
+                self._invalidate_stop_ack(phase)
             ok = await ctl._set_battery_power(
                 battery, max(0, proposed), max(0, -proposed),
                 owner=f"phase:{phase}",
@@ -418,9 +460,6 @@ class PhaseRuntime:
                 perf.command(accepted=ok)
             if ok:
                 self.manager.acknowledge(phase, proposed, now=now)
-                if proposed != 0:
-                    # The earlier zero ACK no longer reflects the setpoint.
-                    self._stop_confirmed.discard(phase)
                 self.safety_status[phase] = "normal_command_accepted"
             else:
                 self.safety_status[phase] = "normal_command_unconfirmed"
