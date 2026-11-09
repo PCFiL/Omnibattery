@@ -6396,6 +6396,15 @@ class ChargeDischargeController:
         the battery in a positive charging state. A confirmed hard overload still
         hands control to demand protection.
         """
+        from .control.edf_tempo import is_tempo_offpeak
+        if not is_tempo_offpeak(dt_util.now()):
+            # Hard HC gate for Time Slot, Dynamic Pricing and Real-Time Price.
+            # PhaseRuntime separately releases its owned battery setpoints.
+            self.grid_charging_active = False
+            self._grid_charging_initialized = False
+            self._phase_predictive_targets = {}
+            return
+
         consumption_state = self.hass.states.get(self.consumption_sensor)
         sensor_raw = self._apply_meter_transform(consumption_state)
         if sensor_raw is None:
