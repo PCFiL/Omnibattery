@@ -83,6 +83,7 @@ class PhaseRuntime:
         self._last_stop_ack = {}
         self._recovery_started = {}
         self.safety_status = {}
+        self._last_grid_charge_owner: dict[str, str] = {}
 
     def _performance(self, phase):
         """Return optional instrumentation without affecting battery control."""
@@ -240,10 +241,14 @@ class PhaseRuntime:
             predictive_target = getattr(
                 ctl, "_phase_predictive_targets", {}
             ).get(battery.name)
+            from homeassistant.util import dt as dt_util
+            from .edf_tempo import is_tempo_offpeak
+            predictive_offpeak = is_tempo_offpeak(dt_util.now())
             try:
                 current_soc = float(battery.data.get("battery_soc", 0))
                 predictive_pending = (
-                    getattr(ctl, "predictive_charging_enabled", False)
+                    predictive_offpeak
+                    and getattr(ctl, "predictive_charging_enabled", False)
                     and not getattr(ctl, "predictive_charging_overridden", False)
                     and getattr(ctl, "grid_charging_active", False)
                     and predictive_target is not None
@@ -257,6 +262,7 @@ class PhaseRuntime:
                 else "predictive" if predictive_pending else None
             )
             if forced_charge_mode is not None:
+                self._last_grid_charge_owner[phase] = forced_charge_mode
                 from .edf_tempo import phase_tempo_charge_request
                 from math import isfinite
 
@@ -361,9 +367,28 @@ class PhaseRuntime:
                     self.safety_status[phase] = f"{forced_charge_mode}_charge_command_unconfirmed"
                 continue
 
+            # At the exact end of the off-peak predictive interval, release the
+            # last grid charge command before normal daytime Phase PD may act.
+            # It can absorb fresh solar surplus again in a subsequent cycle.
+            state = self.manager.planner.states[channel.battery_key]
+            if (
+                not predictive_offpeak
+                and self._last_grid_charge_owner.get(phase) == "predictive"
+            ):
+                if state.last_command_w > 0:
+                    stopped = await ctl._set_battery_power(
+                        battery, 0, 0, owner=f"phase:{phase}", force_write=True
+                    )
+                    if not stopped:
+                        self.safety_status[phase] = "predictive_hc_end_stop_unconfirmed"
+                        continue
+                    self.manager.acknowledge(phase, 0, now=now)
+                self._last_grid_charge_owner.pop(phase, None)
+                self.safety_status[phase] = "predictive_hc_end_released"
+                continue
+
             # Hard handover at 06:00 on red days: remove any residual
             # overnight charging command before normal phase PD resumes.
-            state = self.manager.planner.states[channel.battery_key]
             if getattr(ctl, "_tempo_red_peak_active", False) and state.last_command_w > 0:
                 ok = await ctl._set_battery_power(
                     battery, 0, 0, owner=f"phase:{phase}", force_write=True,
