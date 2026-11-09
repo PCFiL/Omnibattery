@@ -85,8 +85,8 @@ class PhaseDemandProfile:
         if runtime is None:
             return []
         return sorted(
-            (c.phase, c.battery_key, c.grid_sensor,
-             runtime._fallback_by_phase.get(c.phase))
+            [c.phase, c.battery_key, c.grid_sensor,
+             runtime._fallback_by_phase.get(c.phase)]
             for c in runtime.channels if c.enabled
         )
 
@@ -166,10 +166,12 @@ class PhaseDemandProfile:
             self._previous = None
             return
         old = self._previous
+        if old and (now - old[0]).total_seconds() < MIN_SAMPLE_STEP_S:
+            return
         self._previous = (now, powers)
         if old:
             elapsed = (now - old[0]).total_seconds()
-            if MIN_SAMPLE_STEP_S <= elapsed <= MAX_SAMPLE_GAP_S:
+            if elapsed <= MAX_SAMPLE_GAP_S:
                 mean = {p: (old[1][p] + powers[p]) / 2.0 for p in PHASES}
                 self._integrate(old[0], now, mean)
         if self._dirty and (
@@ -244,3 +246,35 @@ class PhaseDemandProfile:
             "pv_note": "phase demand is net of solar; gross PV generation not estimated",
         }
         return forecast
+
+
+def allocate_energy_by_phase(
+    total_kwh: float, headroom_kwh: dict, demand_kwh: dict
+) -> dict:
+    """Bounded water-fill preserving the global energy purchase exactly.
+
+    `headroom_kwh` and `demand_kwh` have the same battery keys.
+    Relative demand is used only to choose the battery receiving energy;
+    the global predictive decision has already determined `total_kwh`.
+    """
+    allocation = {key: 0.0 for key in headroom_kwh}
+    remaining = min(max(0.0, total_kwh), sum(max(0.0, h) for h in headroom_kwh.values()))
+    active = {k for k, h in headroom_kwh.items() if h > 0.0}
+    while remaining > 1e-8 and active:
+        # Prevent a genuinely low-demand phase from being starved forever.
+        weights = {key: max(0.05, float(demand_kwh.get(key, 0.0))) for key in active}
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            break
+        spent = 0.0
+        for key in tuple(active):
+            room = max(0.0, headroom_kwh[key] - allocation[key])
+            take = min(room, remaining * weights[key] / total_weight)
+            allocation[key] += take
+            spent += take
+            if room - take < 1e-8:
+                active.remove(key)
+        if spent <= 1e-8:
+            break
+        remaining -= spent
+    return allocation
