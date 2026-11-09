@@ -4874,7 +4874,23 @@ class MarstekVenusPanel extends HTMLElement {
           text: disp,
           tone: raw === "stable" ? "good" : (raw === "oscillating" || raw === "sluggish") ? "warn" : "neutral",
         };
-      case K.predictiveActive:
+      case K.predictiveActive: {
+        // The binary sensor is ON only while the controller is *charging*;
+        // the switch represents user configuration. Do not label an idle
+        // but enabled forecast planner as "disabled" in the Summary view.
+        const switchState = this._stateFor(this._index().byKey, K.predictiveSwitch);
+        const configured = this._sval(switchState);
+        const fr = this._lang().toLowerCase().startsWith("fr");
+        if (configured === "on") {
+          return raw === "on"
+            ? { text: fr ? "Charge en cours" : "Charging", tone: "good" }
+            : { text: fr ? "Activée · En veille" : "Enabled · Idle", tone: "good" };
+        }
+        if (configured === "off") {
+          return { text: fr ? "Désactivée" : "Disabled", tone: "neutral" };
+        }
+        return { text: disp, tone: raw === "on" ? "good" : "neutral" };
+      }
       case K.curtailmentActive:
       case K.surplusHold:
       case K.capacityActive:
@@ -5610,8 +5626,12 @@ class MarstekVenusPanel extends HTMLElement {
 
   /** One model object per battery device (has a battery_soc entity). */
   _batteryModel() {
-    const { byDevice } = this._index();
+    const { byDevice, byKey } = this._index();
     const hass = this._hass;
+    // IntegrationStatusSensor already exposes the manager's exact, per-battery
+    // thermal derate factor. Reuse it rather than reimplement the curve in JS.
+    const integrationStatus = this._stateFor(byKey, K.integration);
+    const thermalByName = integrationStatus?.attributes?.temperature_charge_limit || {};
     const list = [];
     for (const [dev, ids] of byDevice) {
       const byTk = {};
@@ -5680,6 +5700,7 @@ class MarstekVenusPanel extends HTMLElement {
         capacity: this._num(byTk[K.batteryTotalEnergy]),
         inverter,
         temp: this._num(byTk[K.internalTemp]),
+        thermal: thermalByName[name] || null,
         soh: this._num(byTk[K.batterySoh]),
         voltage: this._num(byTk[K.batteryVoltage]),
         cellMax: cmax,
@@ -5916,6 +5937,8 @@ class MarstekVenusPanel extends HTMLElement {
     };
     if (b.entIds[K.batterySoh]) addMetric("soh", this._t("mSoh"), K.batterySoh);
     addMetric("temp", this._t("mTemp"), K.internalTemp);
+    addMetric("thermal", this._lang().toLowerCase().startsWith("fr")
+      ? "Charge autorisée (temp.)" : "Charge power (thermal)");
     if (b.entIds[K.batteryVoltage]) addMetric("volt", this._t("mVoltage"), K.batteryVoltage);
     if (b.entIds[K.cellMax]) addMetric("cmax", this._t("mCellMax"), K.cellMax);
     if (b.entIds[K.cellMin]) addMetric("cmin", this._t("mCellMin"), K.cellMin);
@@ -6373,6 +6396,28 @@ class MarstekVenusPanel extends HTMLElement {
     const M = r.M;
     if (M.soh) M.soh.textContent = b.soh != null ? `${this._nf(b.soh, 0)} %` : "—";
     M.temp.textContent = b.temp != null ? `${this._nf(b.temp, 1)} °C` : "—";
+    if (M.thermal) {
+      const th = b.thermal;
+      const row = M.thermal.closest(".metric");
+      const enabled = th?.enabled === true;
+      if (row) row.style.display = enabled ? "" : "none";
+      const factor = Number(th?.derate_factor);
+      if (enabled && Number.isFinite(factor) && th?.internal_temperature != null) {
+        const pct = Math.round(this._clamp(factor * 100, 0, 100));
+        const reduced = th.derating === true && pct < 100;
+        M.thermal.textContent = pct + " %";
+        M.thermal.style.color = reduced ? "oklch(0.82 0.14 75)" : "var(--battery)";
+        M.thermal.title = reduced
+          ? (this._lang().toLowerCase().startsWith("fr")
+            ? "Réduction thermique : −" + (100 - pct) + " %"
+            : "Thermal derate: −" + (100 - pct) + " %")
+          : "";
+      } else {
+        M.thermal.textContent = "—";
+        M.thermal.style.color = "";
+        M.thermal.title = "";
+      }
+    }
     if (M.volt) M.volt.textContent = b.voltage != null ? `${this._nf(b.voltage, 2)} V` : "—";
     if (M.cmax) M.cmax.textContent = b.cellMax != null ? `${this._nf(b.cellMax, 3)} V` : "—";
     if (M.cmin) M.cmin.textContent = b.cellMin != null ? `${this._nf(b.cellMin, 3)} V` : "—";
