@@ -1816,6 +1816,14 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
             net_power_w = int(net_power_w)
 
         async with self.lock:
+            # Recheck inside the device lock: commands queued before the pause
+            # must never run after the pause flag becomes active.
+            controller = getattr(self, "_ev_charging_pause_controller", None)
+            if net_power_w != 0 and controller is not None and controller.ev_charging_pause_enabled:
+                return SetpointResult(
+                    ok=False, net_power_w=0, confirmed=False,
+                    failure_reason="ev_charging_pause",
+                )
             try:
                 result = await self.driver.apply_setpoint(net_power_w, read_back=read_back)
             except Exception as e:
