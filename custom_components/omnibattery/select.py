@@ -6,6 +6,7 @@ import logging
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -500,6 +501,9 @@ class MarstekManualForceModeSelect(CoordinatorEntity, SelectEntity):
         chosen direction) keeps the select on the picked option until the next
         control cycle re-asserts it, instead of snapping back.
         """
+        controller = getattr(self.coordinator, "_ev_charging_pause_controller", None)
+        if controller is not None and controller.ev_charging_pause_enabled:
+            raise HomeAssistantError("EV charging pause is active: manual force mode is locked")
         self.coordinator.manual_force_mode = option
         if option == "Charge":
             self.coordinator.commanded_charge_power = self.coordinator.manual_set_charge_power
