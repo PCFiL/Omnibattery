@@ -333,16 +333,14 @@ def _arome_dated_periods(
         return ()
     today_state = hass.states.get(today_id)
     tomorrow_state = hass.states.get(tomorrow_id)
-    now = datetime.now().astimezone()
-    # Use the actual local date encoded in the AROME 'today' forecast
-    # intervals, not the execution host's timezone when HA is configured
-    # differently from the host. Refuse missing today curves entirely.
-    today_attrs = getattr(today_state, "attributes", {}) or {}
-    first = (today_attrs.get("detailedForecast15") or today_attrs.get("detailedForecast") or [])
-    first_start = _parse_period_timestamp(first[0].get("period_start")) if first and isinstance(first[0], dict) else None
-    if first_start is None:
+    # Match the provider's civil-day curve against Home Assistant's configured
+    # timezone. Do not mistake a stale yesterday curve for today's forecast.
+    timezone_name = getattr(getattr(hass, "config", None), "time_zone", None)
+    try:
+        local_tz = ZoneInfo(str(timezone_name)) if timezone_name else datetime.now().astimezone().tzinfo
+    except (KeyError, ValueError):
         return ()
-    today = first_start.date()
+    today = datetime.now(local_tz).date()
     today_periods = _arome_power_periods(today_state, day=today)
     tomorrow_periods = _arome_power_periods(
         tomorrow_state, day=today + timedelta(days=1)
