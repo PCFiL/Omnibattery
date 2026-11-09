@@ -5,7 +5,9 @@ import asyncio
 import contextlib
 import logging
 import math
-import time
+# Use an explicit alias: importing the integration's .time platform can
+# overwrite the package attribute named 'time' after Home Assistant loads it.
+import time as _stdlib_time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -2314,7 +2316,7 @@ class ChargeDischargeController:
                 ChargeDischargeController._daily_operation_weekly_delay_bypass(self),
                 current.date().isoformat(),
             )
-            monotonic_now = time.monotonic()
+            monotonic_now = _stdlib_time.monotonic()
             should_project = (
                 force_projection
                 or projection_signature != self._daily_operation_last_projection_signature
@@ -3155,7 +3157,7 @@ class ChargeDischargeController:
         error is not a tuning fault, so the metric is skipped too — the sensor reports
         the "battery_limited" state instead.
         """
-        now = time.monotonic()
+        now = _stdlib_time.monotonic()
         if (
             self._pd_quality_prev_target is not None
             and abs(active_target - self._pd_quality_prev_target) > max(self.deadband, 20.0)
@@ -3193,18 +3195,18 @@ class ChargeDischargeController:
     def _set_pd_limited(self, value: bool) -> None:
         """Set the battery-limited flag and stamp it for the TTL."""
         self._pd_limited = value
-        self._pd_limited_ts = time.monotonic() if value else None
+        self._pd_limited_ts = _stdlib_time.monotonic() if value else None
 
     def _set_pd_blocked(self, value: bool) -> None:
         """Set the demand-blocked flag and stamp it for the TTL."""
         self._pd_blocked = value
-        self._pd_blocked_ts = time.monotonic() if value else None
+        self._pd_blocked_ts = _stdlib_time.monotonic() if value else None
 
     def _pd_flag_live(self, value: bool, stamped_at: float | None) -> bool:
         """Return True while a set flag is still within its TTL."""
         if not value or stamped_at is None:
             return False
-        return (time.monotonic() - stamped_at) <= self._pd_flag_ttl_s
+        return (_stdlib_time.monotonic() - stamped_at) <= self._pd_flag_ttl_s
 
     @property
     def pd_limited(self) -> bool:
@@ -3235,7 +3237,7 @@ class ChargeDischargeController:
         """
         if self._pd_quality_last_advance_ts is None:
             return None
-        return max(0.0, time.monotonic() - self._pd_quality_last_advance_ts)
+        return max(0.0, _stdlib_time.monotonic() - self._pd_quality_last_advance_ts)
 
     @property
     def pd_quality_oscillation_per_min(self) -> float:
@@ -5973,7 +5975,7 @@ class ChargeDischargeController:
         self._predictive_demand_fresh_samples = 0
         self._predictive_demand_recovery_samples = 0
         if not already_suspended:
-            self._predictive_demand_transition_monotonic = time.monotonic()
+            self._predictive_demand_transition_monotonic = _stdlib_time.monotonic()
         self._predictive_protection_command_w = 0.0
         self._predictive_protection_reason = None
         self._predictive_hard_limit_samples = 0
@@ -6215,7 +6217,7 @@ class ChargeDischargeController:
                     if not ChargeDischargeController._is_battery_manual_owned(coordinator):
                         await self._set_battery_power(coordinator, 0, 0)
                 self._predictive_demand_state = "settling_after_discharge"
-                self._predictive_demand_transition_monotonic = time.monotonic()
+                self._predictive_demand_transition_monotonic = _stdlib_time.monotonic()
                 self._predictive_demand_fresh_samples = 0
                 self._predictive_protection_command_w = 0.0
                 self.previous_power = 0
@@ -6234,7 +6236,7 @@ class ChargeDischargeController:
             transition_at = getattr(
                 self, "_predictive_demand_transition_monotonic", 0.0
             )
-            settle_elapsed_s = time.monotonic() - transition_at
+            settle_elapsed_s = _stdlib_time.monotonic() - transition_at
             latency_elapsed = (
                 transition_at > 0.0
                 and settle_elapsed_s >= self._predictive_demand_settle_window_s()
@@ -6331,7 +6333,7 @@ class ChargeDischargeController:
                 if not ChargeDischargeController._is_battery_manual_owned(coordinator):
                     await self._set_battery_power(coordinator, 0, 0)
             self._predictive_demand_state = "settling_after_discharge"
-            self._predictive_demand_transition_monotonic = time.monotonic()
+            self._predictive_demand_transition_monotonic = _stdlib_time.monotonic()
             self._predictive_demand_fresh_samples = 0
             self._predictive_protection_command_w = 0.0
             self.previous_power = 0
@@ -6836,7 +6838,7 @@ class ChargeDischargeController:
         if current is None or (current != 0 and (current > 0) == (intended > 0)):
             return
         # A battery that keeps refusing must not hog the v3 single TCP slot.
-        now = time.monotonic()
+        now = _stdlib_time.monotonic()
         if now - getattr(coordinator, "_manual_reassert_ts", 0.0) < 30:
             return
         coordinator._manual_reassert_ts = now
@@ -8061,7 +8063,7 @@ class ChargeDischargeController:
         # it keeps the time-based subsystems running and forces a recalc within
         # its own period. 0 = disabled.
         if now is None and self._min_cycle_interval_s > 0:
-            elapsed = time.monotonic() - self._last_cycle_monotonic
+            elapsed = _stdlib_time.monotonic() - self._last_cycle_monotonic
             if elapsed < self._min_cycle_interval_s:
                 if DEBUG_CONTROL_LOOP_DETAIL:
                     _LOGGER.debug(
@@ -8074,7 +8076,7 @@ class ChargeDischargeController:
                 _LOGGER.debug("Control cycle already running; skipping overlapping trigger.")
             return
         async with self._control_lock:
-            self._last_cycle_monotonic = time.monotonic()
+            self._last_cycle_monotonic = _stdlib_time.monotonic()
             try:
                 await self._run_control_cycle(now)
             finally:
@@ -8121,7 +8123,7 @@ class ChargeDischargeController:
         if self._control_lock.locked():
             return
         async with self._control_lock:
-            self._last_cycle_monotonic = time.monotonic()
+            self._last_cycle_monotonic = _stdlib_time.monotonic()
             await self._run_control_cycle()
 
     def _cancel_no_pd_debounced_run(self):
@@ -8259,7 +8261,7 @@ class ChargeDischargeController:
         - A candidate older than FEEDFORWARD_CANDIDATE_MAX_AGE_S (deadband or
           blocked cycles in between) is stale and cannot confirm.
         """
-        now = time.monotonic()
+        now = _stdlib_time.monotonic()
         candidate = self._step_candidate
         self._step_candidate = None
         if candidate is not None:
@@ -8732,7 +8734,7 @@ class ChargeDischargeController:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
 
-        mono = time.monotonic()
+        mono = _stdlib_time.monotonic()
         if self._solar_forecast_bad_since is None:
             self._solar_forecast_bad_since = mono
             return
@@ -8826,7 +8828,7 @@ class ChargeDischargeController:
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
 
-        mono = time.monotonic()
+        mono = _stdlib_time.monotonic()
         if self._missing_sensors_since is None:
             self._missing_sensors_since = mono
             return
