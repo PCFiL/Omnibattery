@@ -4574,6 +4574,19 @@ class PricingManager:
         # callers/tests; read the richer contract separately for dated periods.
         remaining_solar_kwh = self._remaining_solar_today_kwh(now)
         solar_forecast_input = self._read_remaining_solar_input(now=now)
+        # A future-dated provider curve can justify charging less tonight
+        # because tomorrow's PV actually lies inside the energy horizon.
+        # Never reuse a "remaining today" scalar as tomorrow's forecast.
+        if (
+            horizon_end > end_of_day
+            and solar_forecast_input is not None
+            and solar_forecast_input.periods
+        ):
+            tz = solar_forecast_local_timezone(self._hass, controller, now)
+            remaining_solar_kwh = solar_forecast_period_energy_between(
+                solar_forecast_input.periods, now, horizon_end,
+                timezone=tz,
+            )
 
         decision = await controller._should_activate_grid_charging(
             consumption_override_kwh=remaining_consumption_kwh,
@@ -4638,9 +4651,43 @@ class PricingManager:
             midnight = current.replace(
                 hour=0, minute=0, second=0, microsecond=0
             ) + timedelta(days=1)
+            horizon_end = midnight
+            # Tempo blue/white: at the evening HC window, extend the balance
+            # through tomorrow's daylight only when the configured solar
+            # provider publishes explicitly dated future periods. The calendar
+            # color and date must be confirmed; a scalar forecast is not enough.
+            if (
+                getattr(self._controller, "predictive_charging_mode", None)
+                == PREDICTIVE_MODE_TIME_SLOT
+                and current.hour >= 18
+            ):
+                state = self._hass.states.get("sensor.edf_tempo")
+                attrs = state.attributes if state else {}
+                tomorrow = (current + timedelta(days=1)).date()
+                color = str(attrs.get("tomorrow_color", "")).strip().lower()
+                if (
+                    color in {"bleu", "blanc", "blue", "white"}
+                    and str(attrs.get("tomorrow_date", "")) == tomorrow.isoformat()
+                ):
+                    forecast = read_solar_forecast_kwh(
+                        self._hass, self._controller, update_controller=False
+                    )
+                    if forecast is not None and forecast.periods:
+                        tz = solar_forecast_local_timezone(
+                            self._hass, self._controller, current
+                        )
+                        tomorrow_noon = midnight.replace(
+                            hour=12, tzinfo=tz
+                        )
+                        if any(
+                            period.end.timestamp() >= tomorrow_noon.timestamp()
+                            and period.start.timestamp() < tomorrow_noon.timestamp()
+                            for period in forecast.periods
+                        ):
+                            horizon_end = midnight + timedelta(hours=22)
             return await self._evaluate_remaining_grid_charging(
                 now=current,
-                horizon_end=midnight,
+                horizon_end=horizon_end,
             )
         return await self._controller._should_activate_grid_charging()
 
