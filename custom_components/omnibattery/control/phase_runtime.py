@@ -225,10 +225,21 @@ class PhaseRuntime:
                 max_charge = 0
             if ctl.get_discharge_blockers(battery):
                 max_discharge = 0
-            # EDF Tempo night charge takes over the phase dispatcher itself.
-            # Phase PD remains the exclusive writer (owner=phase:Lx); the
-            # fleet predictive regulator must not write a phase-owned battery.
-            if getattr(ctl, "_tempo_charge_active", False):
+            # Phase PD is the EXCLUSIVE power writer for these batteries.
+            # Both Tempo and weekly full charge require explicit grid energy;
+            # merely raising the SOC ceiling does not command any watts.
+            # Tempo has priority when the two windows overlap.
+            weekly_manager = getattr(ctl, "_weekly_charge_mgr", None)
+            weekly_requested = bool(
+                weekly_manager is not None
+                and getattr(ctl, "weekly_full_charge_enabled", False)
+                and ctl._weekly_full_charge_unlocked()
+            )
+            forced_charge_mode = (
+                "tempo" if getattr(ctl, "_tempo_charge_active", False)
+                else "weekly" if weekly_requested else None
+            )
+            if forced_charge_mode is not None:
                 from .edf_tempo import phase_tempo_charge_request
                 from math import isfinite
 
@@ -243,7 +254,7 @@ class PhaseRuntime:
                 )
                 if global_power is None or not isfinite(global_power) or not fresh:
                     await self._force_zero(channel, battery, now=now)
-                    self.safety_status[phase] = "tempo_global_meter_invalid_or_stale"
+                    self.safety_status[phase] = f"{forced_charge_mode}_global_meter_invalid_or_stale"
                     continue
 
                 # Preserve the existing channel rate limit and phase owner.
@@ -252,16 +263,51 @@ class PhaseRuntime:
                     prior.last_command_at is not None
                     and now - prior.last_command_at < channel.min_command_interval_s
                 ):
-                    self.safety_status[phase] = "tempo_rate_limited"
+                    self.safety_status[phase] = f"{forced_charge_mode}_rate_limited"
                     continue
 
-                # Contract limit is shared between all phases. After each
-                # accepted increment, reserve it immediately for later phases
+                # The same contracted import and per-phase power safeguards
+                # apply to weekly and Tempo charging. After each accepted
+                # increment, reserve it immediately for later phases
                 # in this very cycle (global meter reading may not update yet).
                 remaining = float(ctl._predictive_charge_ceiling()) - float(global_power)
                 remaining -= getattr(self, "_tempo_reserved_increment_w", 0.0)
+
+                # A phase previously discharging at -X W would increase grid
+                # import by X W just by stopping discharge. Never send +charge
+                # directly from -discharge based on charge-only headroom.
+                # Stop first, wait for a fresh meter sample and ramp charging
+                # in a later controller cycle.
+                old_signed_w = float(prior.last_command_w)
+                if old_signed_w < 0:
+                    phase_headroom = float(
+                        ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500)
+                    ) - float(selected.reading.power_w)
+                    release_w = abs(old_signed_w)
+                    if min(phase_headroom, remaining) < release_w:
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_waiting_discharge_release_headroom"
+                        )
+                        continue
+                    stopped = await ctl._set_battery_power(
+                        battery, 0, 0, owner=f"phase:{phase}"
+                    )
+                    if stopped:
+                        self.manager.acknowledge(phase, 0, now=now)
+                        self._tempo_reserved_increment_w = (
+                            getattr(self, "_tempo_reserved_increment_w", 0.0)
+                            + release_w
+                        )
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_discharge_stopped_before_charge"
+                        )
+                    else:
+                        self.safety_status[phase] = (
+                            f"{forced_charge_mode}_discharge_stop_unconfirmed"
+                        )
+                    continue
+
                 soc = float(battery.data.get("battery_soc", 0) or 0)
-                weekly_manager = getattr(ctl, "_weekly_charge_mgr", None)
                 bms_full = bool(
                     weekly_manager is not None
                     and weekly_manager.is_battery_full(battery)
@@ -282,7 +328,7 @@ class PhaseRuntime:
                 )
                 last = prior.last_command_w
                 if request == last:
-                    self.safety_status[phase] = "tempo_no_change"
+                    self.safety_status[phase] = f"{forced_charge_mode}_no_change"
                     continue
                 ok = await ctl._set_battery_power(
                     battery, request, 0, owner=f"phase:{phase}",
@@ -293,9 +339,9 @@ class PhaseRuntime:
                         getattr(self, "_tempo_reserved_increment_w", 0.0)
                         + max(0.0, request - max(0.0, last))
                     )
-                    self.safety_status[phase] = "tempo_charge_command_accepted"
+                    self.safety_status[phase] = f"{forced_charge_mode}_charge_command_accepted"
                 else:
-                    self.safety_status[phase] = "tempo_charge_command_unconfirmed"
+                    self.safety_status[phase] = f"{forced_charge_mode}_charge_command_unconfirmed"
                 continue
 
             # Hard handover at 06:00 on red days: remove any residual
