@@ -128,3 +128,38 @@ After migration, system entities keep their old `marstek_venus_system_*` IDs. If
 ## Acknowledgements
 
 Special thanks to [ViperRNMC/marstek_venus_modbus](https://github.com/ViperRNMC/marstek_venus_modbus) for the Modbus register documentation that made this integration possible.
+
+
+### Phase-aware predictive charging (L1/L2/L3)
+
+For a three-phase fleet with three explicitly mapped, enabled Phase PD channels,
+the global predictive energy calculation remains **unchanged**. A second
+allocation stage distributes the **same** planned grid-charge kWh based on
+learned daytime net demand for L1, L2, and L3, while respecting each battery's
+remaining SOC headroom.
+
+- Samples are taken from each configured phase grid meter (with its configured
+  fallback) and corrected with **measured** AC battery power. A phase's net
+  demand is `max(0, grid_power - battery_ac_power)` in controller sign convention.
+  This is *residual demand after PV*, not gross house consumption; the feature
+  does not invent per-phase solar generation.
+- Profiles are persisted for up to 28 days. Only the 06:00–22:00 local daytime
+  period is used for weighting, and only days with >=10 hours of valid
+  telemetry **on every phase** count. At least three completed days are
+  required; up to seven recent complete days are averaged.
+- EV charging sessions identified by Omnibattery, or an active **Pause recharge
+  VE**, are excluded so exceptional car loads do not bias the battery forecast.
+- With missing/stale phase meters, incomplete historical coverage, invalid
+  phase assignments, or too little measured net demand, allocation automatically
+  falls back to the existing charge-headroom proportions.
+- The allocator caps each battery at its available room and redistributes any
+  excess share. It never increases the global planned kWh, adjusts contracted
+  import limits, overrides SOC ceilings, or changes PD/EV pause ownership.
+- `switch.*predictive_charging` exposes `phase_energy_allocation` attributes
+  after predictive targets are calculated, including source, forecast
+  confidence and per-battery allocated kWh. These are diagnostics, not
+  instantaneous measured battery powers.
+
+After installing the update, allow at least **three sufficiently covered days**
+for a phase-based forecast. Until then, behaviour is identical to the existing
+global predictive charge allocator.
