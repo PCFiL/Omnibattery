@@ -266,6 +266,7 @@ FLOOR_HYSTERESIS_PCT = 5
 # Weekly Full Charge Configuration
 CONF_ENABLE_WEEKLY_FULL_CHARGE = "enable_weekly_full_charge"
 CONF_MANUAL_MODE_ENABLED = "manual_mode_enabled"
+CONF_EV_CHARGING_PAUSE_ENABLED = "ev_charging_pause_enabled"
 CONF_BATTERY_MANUAL_MODE_ENABLED = "battery_manual_mode_enabled"
 CONF_PREDICTIVE_CHARGING_OVERRIDDEN = "predictive_charging_overridden"
 CONF_WEEKLY_FULL_CHARGE_DAY = "weekly_full_charge_day"
