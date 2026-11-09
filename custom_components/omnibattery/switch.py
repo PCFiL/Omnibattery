@@ -610,6 +610,15 @@ class PredictiveChargingSwitch(SwitchEntity):
             and not self.controller.predictive_charging_overridden
         )
 
+    @property
+    def extra_state_attributes(self):
+        """Expose the global-kWh-preserving phase allocation and confidence."""
+        return {
+            "phase_energy_allocation": dict(
+                getattr(self.controller, "_phase_predictive_allocation", {})
+            ),
+        }
+
     async def async_turn_on(self, **kwargs) -> None:
         """Enable predictive charging (set enabled, clear override)."""
         self.controller.predictive_charging_enabled = True
