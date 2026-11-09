@@ -165,3 +165,85 @@ async def test_weekly_preserves_discharge_when_release_would_overload_grid():
     await runtime.run()
     assert len(ctl.writes) == writes_before
     assert runtime.safety_status["L3"] == "weekly_waiting_discharge_release_headroom"
+
+
+def _enable_phase_predictive(ctl, target=65.0):
+    ctl.coordinators[0].data = {"battery_soc": 15}
+    ctl.weekly_full_charge_enabled = False
+    ctl._tempo_charge_active = False
+    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_full_charge_unlocked = lambda: False
+    ctl.predictive_charging_enabled = True
+    ctl.predictive_charging_overridden = False
+    ctl.grid_charging_active = True
+    ctl._phase_predictive_targets = {"mix_ac_1": target}
+    ctl.consumption_sensor = "sensor.grid"
+    ctl._apply_meter_transform = lambda state: float(state.state)
+    ctl._sensor_is_within_stale_tolerance = lambda stamp: True
+    ctl._predictive_charge_ceiling = lambda: 7500
+
+
+@pytest.mark.asyncio
+async def test_solar_predictive_phase_owned_charge_uses_existing_phase_writer():
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()  # Phase startup standby
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] > 0
+    assert ctl.writes[-1][2] == 0
+    assert ctl.writes[-1][3] == "phase:L3"
+    assert runtime.safety_status["L3"] == "predictive_charge_command_accepted"
+
+
+@pytest.mark.asyncio
+async def test_predictive_soc_target_reached_releases_phase_to_normal_pd():
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    ctl.coordinators[0].data["battery_soc"] = 66
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] == 0
+    assert ctl.writes[-1][2] > 0
+
+
+@pytest.mark.asyncio
+async def test_tempo_precedes_solar_prediction_and_weekly():
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    ctl._tempo_charge_active = True
+    ctl.weekly_full_charge_enabled = True
+    ctl._weekly_full_charge_unlocked = lambda: True
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert runtime.safety_status["L3"] == "tempo_charge_command_accepted"
+
+
+@pytest.mark.asyncio
+async def test_weekly_precedes_solar_prediction():
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    ctl.weekly_full_charge_enabled = True
+    ctl._weekly_full_charge_unlocked = lambda: True
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert runtime.safety_status["L3"] == "weekly_charge_command_accepted"
+
+
+@pytest.mark.asyncio
+async def test_predictive_respects_charge_blockers():
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    ctl.get_charge_blockers = lambda c: {"user_disabled": "off"}
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] == 0
