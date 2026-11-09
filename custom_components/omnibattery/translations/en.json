@@ -1627,6 +1627,9 @@
       "manual_mode": {
         "name": "Manual Mode"
       },
+      "ev_charging_pause": {
+        "name": "Pause EV Charging"
+      },
       "three_phase_protection": {
         "name": "Three-Phase Current Protection"
       },

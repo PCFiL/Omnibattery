@@ -136,7 +136,7 @@ class PhaseRuntime:
 
     async def run(self):
         ctl = self.controller
-        if not self.active_batteries or ctl.manual_mode_enabled:
+        if not self.active_batteries or ctl.manual_mode_enabled or ctl.ev_charging_pause_enabled:
             return
         # Reserve headroom across all phase decisions inside one controller cycle.
         self._tempo_reserved_increment_w = 0.0

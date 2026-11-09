@@ -147,6 +147,7 @@ from .const import (
     DEFAULT_CAPACITY_PROTECTION_SOC,
     DEFAULT_CAPACITY_PROTECTION_LIMIT,
     CONF_MANUAL_MODE_ENABLED,
+    CONF_EV_CHARGING_PAUSE_ENABLED,
     CONF_BATTERY_MANUAL_MODE_ENABLED,
     CONF_PREDICTIVE_CHARGING_OVERRIDDEN,
     CONF_PREDICTIVE_CHARGING_MODE,
@@ -1187,6 +1188,10 @@ class ChargeDischargeController:
 
         # Manual mode state
         self.manual_mode_enabled = config_entry.data.get(CONF_MANUAL_MODE_ENABLED, False)
+        # High-priority fleet-wide AC standby, persisted across Home Assistant restarts.
+        self.ev_charging_pause_enabled = bool(config_entry.data.get(CONF_EV_CHARGING_PAUSE_ENABLED, False))
+        self.ev_pause_stop_confirmed: dict[str, bool] = {}
+        self._ev_pause_last_stop_attempt: dict[str, float] = {}
 
         # Setpoint offset registry (reference = 0 W grid flow)
         # - Additive offsets: summed to form the base target
@@ -4186,6 +4191,54 @@ class ChargeDischargeController:
             else:
                 self.remove_discharge_block("price_reserve", coordinator=coordinator)
 
+    async def _enforce_ev_charging_pause(self, *, force: bool = False) -> bool:
+        """Keep all AC power setpoints at zero while EV charging has priority.
+
+        A write acknowledgement is not a physical power measurement: expose the
+        confirmation state separately and retry when the reported AC setpoint
+        differs from zero, the device is unavailable, or the last write failed.
+        """
+        all_confirmed = True
+        for coordinator in self.coordinators:
+            name = coordinator.name
+            current = None
+            try:
+                current = coordinator.driver.net_power_from_data(coordinator.data or {})
+            except (AttributeError, TypeError, ValueError):
+                pass
+            confirmed = self.ev_pause_stop_confirmed.get(name, False)
+            measured_w = (coordinator.data or {}).get("battery_power")
+            try:
+                # A hardware setpoint may be zero while actual inverter power
+                # still ramps down. Recheck when delivered AC power stays high.
+                delivery_stopped = measured_w is None or abs(float(measured_w)) <= 50
+            except (TypeError, ValueError):
+                delivery_stopped = False
+            if current == 0 and confirmed and delivery_stopped and not force:
+                continue
+            now_mono = _stdlib_time.monotonic()
+            if not force and now_mono - self._ev_pause_last_stop_attempt.get(name, -1e12) < 15:
+                all_confirmed = False
+                continue
+            self._ev_pause_last_stop_attempt[name] = now_mono
+            try:
+                result = await coordinator.apply_power(0, read_back=True)
+                success = bool(result.ok and result.confirmed)
+                coordinator.commanded_charge_power = 0
+                coordinator.commanded_discharge_power = 0
+                self.ev_pause_stop_confirmed[name] = success
+                if not success:
+                    _LOGGER.error(
+                        "[%s] EV charging pause: zero-power stop not confirmed (%s)",
+                        name, result.failure_reason,
+                    )
+                    all_confirmed = False
+            except Exception:
+                self.ev_pause_stop_confirmed[name] = False
+                all_confirmed = False
+                _LOGGER.exception("[%s] EV charging pause: zero-power stop failed", name)
+        return all_confirmed
+
     def _refresh_ev_blocks(self) -> None:
         """Update EV charger blockers from no-telemetry charger state."""
         ev_pause_active, ev_charging_active = self._external_loads.check_ev_charger_state()
@@ -6955,6 +7008,9 @@ class ChargeDischargeController:
 
         Returns True if command was acknowledged, False otherwise.
         """
+        if self.ev_charging_pause_enabled and (charge_power > 0 or discharge_power > 0):
+            _LOGGER.warning("[%s] EV charging pause blocked %s nonzero command", coordinator.name, owner)
+            return False
         if (owner == "automatic" or owner.startswith("phase:")) and getattr(
             coordinator, CONF_BATTERY_MANUAL_MODE_ENABLED, False
         ):
@@ -9308,6 +9364,13 @@ class ChargeDischargeController:
         # never be cleared. Self-throttled, so running it every cycle is cheap.
         self._pricing_mgr.maybe_check_price_data_health()
 
+        # EV charging pause outranks manual control, phase PD and all planners.
+        # Keep monitoring telemetry; do not issue automatic or manual setpoints.
+        if self.ev_charging_pause_enabled:
+            await self._enforce_ev_charging_pause()
+            self._phase_safety_pending = False
+            return
+
         # === MANUAL MODE CHECK (highest priority) ===
         # If manual mode is enabled, skip all automatic control logic
         if self.manual_mode_enabled:
@@ -11303,6 +11366,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up the charge/discharge controller BEFORE storing in hass.data
     # This allows the controller to register itself in hass.data[DOMAIN]["pid_controller"]
     controller = ChargeDischargeController(hass, coordinators, entry.data["consumption_sensor"], entry)
+    for coordinator in coordinators:
+        # Guard the actual driver write, including manual schedules and direct sliders.
+        coordinator._ev_charging_pause_controller = controller
     from .control.phase_runtime import PhaseRuntime
     try:
         controller._phase_runtime = PhaseRuntime(controller)
