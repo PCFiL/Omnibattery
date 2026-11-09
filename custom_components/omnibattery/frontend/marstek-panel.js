@@ -6873,6 +6873,10 @@ class MarstekVenusPanel extends HTMLElement {
         const shortName = String(phase.name || "").replace(/^Zendure SolarFlow\s*/i, "");
         addRow(phase.phase + " · " + shortName,
           phase.soc == null ? "SOC —" : "SOC " + phase.soc + " %", true);
+        if (phase.predictive_target_soc != null) {
+          addRow("SOC cible prédictif",
+            Number(phase.predictive_target_soc).toFixed(1) + " %");
+        }
         if (phase.safety) addRow("État de la phase", phase.safety);
       }
     }
