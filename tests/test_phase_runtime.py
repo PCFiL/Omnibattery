@@ -117,3 +117,51 @@ async def test_weekly_grid_charge_respects_per_phase_import_ceiling():
     runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
     await runtime.run()
     assert ctl.writes[-1][1] <= 100  # 2500W phase cap - 2400W grid
+
+
+@pytest.mark.asyncio
+async def test_weekly_charge_stops_prior_discharge_before_charging():
+    ctl = FakeController(sensor_value="300")
+    ctl.coordinators[0].data = {"battery_soc": 15}
+    ctl.weekly_full_charge_enabled = True
+    ctl._tempo_charge_active = False
+    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_full_charge_unlocked = lambda: True
+    ctl.consumption_sensor = "sensor.grid"
+    ctl._apply_meter_transform = lambda state: float(state.state)
+    ctl._sensor_is_within_stale_tolerance = lambda stamp: True
+    ctl._predictive_charge_ceiling = lambda: 7500
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    prior = runtime.manager.planner.states["mix_ac_1"]
+    prior.last_command_w = -800
+    prior.last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1] == ("mix_ac_1", 0, 0, "phase:L3")
+    assert runtime.safety_status["L3"] == "weekly_discharge_stopped_before_charge"
+    prior.last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] > 0
+
+
+@pytest.mark.asyncio
+async def test_weekly_preserves_discharge_when_release_would_overload_grid():
+    ctl = FakeController(sensor_value="2300")
+    ctl.coordinators[0].data = {"battery_soc": 15}
+    ctl.weekly_full_charge_enabled = True
+    ctl._tempo_charge_active = False
+    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_full_charge_unlocked = lambda: True
+    ctl.consumption_sensor = "sensor.grid"
+    ctl._apply_meter_transform = lambda state: float(state.state)
+    ctl._sensor_is_within_stale_tolerance = lambda stamp: True
+    ctl._predictive_charge_ceiling = lambda: 7500
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    prior = runtime.manager.planner.states["mix_ac_1"]
+    prior.last_command_w = -800
+    prior.last_command_at -= 6
+    writes_before = len(ctl.writes)
+    await runtime.run()
+    assert len(ctl.writes) == writes_before
+    assert runtime.safety_status["L3"] == "weekly_waiting_discharge_release_headroom"
