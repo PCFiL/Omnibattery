@@ -5908,6 +5908,34 @@ class ChargeDischargeController:
             )
         grid_charge_kwh = min(total_gap_kwh, max(0.0, planned_grid_charge_kwh))
 
+        # A second-stage phase allocator may redistribute these *same* kWh,
+        # but it never modifies the global demand forecast or purchased energy.
+        phase_allocation = None
+        phase_profile = getattr(self, "_phase_demand_profile", None)
+        if phase_profile is not None:
+            from .tracking.phase_demand_profile import allocate_energy_by_phase
+            phase_forecast = phase_profile.forecast_daytime()
+            runtime = getattr(self, "_phase_runtime", None)
+            if phase_forecast and runtime is not None:
+                phase_by_battery = {
+                    channel.battery_key: channel.phase
+                    for channel in runtime.channels if channel.enabled
+                }
+                if all(c.name in phase_by_battery for c in coordinators_with_data):
+                    demand_weights = {
+                        c: phase_forecast[phase_by_battery[c.name]]
+                        for c in coordinators_with_data
+                    }
+                    phase_allocation = allocate_energy_by_phase(
+                        grid_charge_kwh, gaps, demand_weights
+                    )
+        self._phase_predictive_allocation = {
+            "source": "phase_net_demand" if phase_allocation is not None else "battery_headroom",
+            "planned_grid_charge_kwh": round(grid_charge_kwh, 3),
+            "phase_profile": dict(phase_profile.diagnostics) if phase_profile is not None else {"source": "unavailable"},
+            "allocated_kwh": {},
+        }
+
         # When the guaranteed floor is what asked for this charge, it is also
         # the stop condition. The proportional split above spreads the floor
         # deficit over every battery by gap-to-ceiling, so a battery under the
@@ -5926,7 +5954,12 @@ class ChargeDischargeController:
             if capacity <= 0:
                 targets[c] = ceiling
                 continue
-            share_kwh = (gaps[c] / total_gap_kwh) * grid_charge_kwh
+            share_kwh = (
+                phase_allocation[c]
+                if phase_allocation is not None
+                else (gaps[c] / total_gap_kwh) * grid_charge_kwh
+            )
+            self._phase_predictive_allocation["allocated_kwh"][c.name] = round(share_kwh, 3)
             target = min(ceiling, current_soc + (share_kwh / capacity) * 100.0)
             if floor_soc:
                 target = min(ceiling, max(target, floor_soc))
@@ -9330,6 +9363,14 @@ class ChargeDischargeController:
         # slow-sensor repair nor the invalid-state log can see that. Must sit
         # ahead of the manual-mode / block / predictive early returns below.
         self._check_main_sensor_liveness(now)
+        # Phase-history learning runs ahead of every automatic/manual/VE early
+        # return so the demand model can learn throughout the day.
+        profile = getattr(self, "_phase_demand_profile", None)
+        if profile is not None:
+            try:
+                await profile.record()
+            except Exception:
+                _LOGGER.exception("Phase predictive learning failed")
 
         # === HOUSEHOLD CONSUMPTION ACCUMULATION ===
         # Run before manual mode check so samples are never lost
@@ -11374,6 +11415,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         controller._phase_runtime = PhaseRuntime(controller)
     except (ValueError, TypeError, KeyError) as err:
         raise ConfigEntryNotReady(f"Invalid per-phase PD configuration: {err}") from err
+    from .tracking.phase_demand_profile import PhaseDemandProfile
+    controller._phase_demand_profile = PhaseDemandProfile(hass, entry, controller)
     # This is advisory only and is evaluated at setup and after option updates,
     # independently of grid-sensor health or the control loop.
     controller._check_solar_forecast_migration()
@@ -11431,6 +11474,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # prevents the integration from starting.
     await consumption_tracker.load_consumption_profile()
     await consumption_tracker.load_solar_profile()
+    await controller._phase_demand_profile.async_load()
 
     # Restore household and solar accumulators from persistent storage
     await consumption_tracker.load_accumulators()
@@ -11908,6 +11952,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # (~5 min) save, which would step their values backwards and spam the log.
         if controller and controller._consumption_tracker is not None:
             await controller._consumption_tracker.async_save_all()
+        if controller and getattr(controller, "_phase_demand_profile", None) is not None:
+            await controller._phase_demand_profile.async_save()
 
         if controller:
             timeline = getattr(controller, "_daily_operation_timeline", None)
