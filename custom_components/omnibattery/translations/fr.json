@@ -1635,6 +1635,9 @@
       "manual_mode": {
         "name": "Mode Manuel"
       },
+      "ev_charging_pause": {
+        "name": "Pause recharge VE"
+      },
       "three_phase_protection": {
         "name": "Protection de courant triphasé"
       },
