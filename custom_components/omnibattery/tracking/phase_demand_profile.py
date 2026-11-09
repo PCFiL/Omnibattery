@@ -160,6 +160,20 @@ class PhaseDemandProfile:
             cursor = boundary
 
     async def record(self) -> None:
+        # EV charging is an exceptional load, not a normal house-demand
+        # pattern. Skip it instead of incorrectly sizing tomorrow's P3 SOC.
+        if getattr(self.controller, "ev_charging_pause_enabled", False):
+            self._previous = None
+            return
+        external = getattr(self.controller, "_external_loads", None)
+        if external is not None:
+            try:
+                _pause, ev_active = external.check_ev_charger_state()
+                if ev_active:
+                    self._previous = None
+                    return
+            except (AttributeError, TypeError, ValueError):
+                pass
         now = dt_util.utcnow()
         powers = self._read_demands(now)
         if powers is None:
