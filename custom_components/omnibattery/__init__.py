@@ -6456,8 +6456,20 @@ class ChargeDischargeController:
         # to PhaseRuntime, which remains the exclusive per-phase power writer.
         phase_runtime = getattr(self, "_phase_runtime", None)
         self._phase_predictive_targets = {}
-        if (
+        # A mixed fleet needs a separate cross-owner import budget reservation:
+        # until that arbitration exists, do not issue phase predictive commands
+        # in parallel with the ordinary fleet predictive distributor.
+        phase_only_fleet = bool(
             phase_runtime is not None
+            and phase_runtime.active_batteries
+            and all(
+                c.name in phase_runtime.active_batteries
+                for c in self.coordinators
+                if not self._is_battery_manual_owned(c)
+            )
+        )
+        if (
+            phase_only_fleet
             and self.predictive_charging_enabled
             and not self.predictive_charging_overridden
             and self.grid_charging_active
