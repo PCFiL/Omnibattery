@@ -4207,7 +4207,14 @@ class ChargeDischargeController:
             except (AttributeError, TypeError, ValueError):
                 pass
             confirmed = self.ev_pause_stop_confirmed.get(name, False)
-            if current == 0 and confirmed and not force:
+            measured_w = (coordinator.data or {}).get("battery_power")
+            try:
+                # A hardware setpoint may be zero while actual inverter power
+                # still ramps down. Recheck when delivered AC power stays high.
+                delivery_stopped = measured_w is None or abs(float(measured_w)) <= 50
+            except (TypeError, ValueError):
+                delivery_stopped = False
+            if current == 0 and confirmed and delivery_stopped and not force:
                 continue
             now_mono = _stdlib_time.monotonic()
             if not force and now_mono - self._ev_pause_last_stop_attempt.get(name, -1e12) < 15:
