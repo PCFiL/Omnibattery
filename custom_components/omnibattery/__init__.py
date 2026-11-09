@@ -5740,21 +5740,38 @@ class ChargeDischargeController:
         return pairs
 
     def _active_charging_slot(self):
-        """Return the charging window dict we are currently inside, or None."""
-        from datetime import datetime, time as dt_time
-        now = datetime.now()
-        current_time = now.time()
-        current_day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.weekday()]
+        """Return an authorised off-peak predictive time slot, if any.
+
+        Configured weekdays refer to the start of the slot. For example,
+        Monday 22:00–06:00 remains Monday's slot on Tuesday 05:59, but
+        cannot leak into daytime. EDF Tempo's HC interval is a hard gate
+        even when a user configured a wider predictive time slot.
+        """
+        from datetime import time as dt_time
+        from .control.edf_tempo import PARIS, is_tempo_offpeak
+        now = dt_util.now().astimezone(PARIS)
+        if not is_tempo_offpeak(now):
+            return None
+        current_time = now.time().replace(tzinfo=None)
+        days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        today = days[now.weekday()]
+        yesterday = days[(now.weekday() - 1) % 7]
         for slot in self.charging_time_slots:
-            if current_day not in slot.get("days", []):
-                continue
             try:
                 start_time = dt_time.fromisoformat(slot["start_time"])
                 end_time = dt_time.fromisoformat(slot["end_time"])
-            except Exception as e:
-                _LOGGER.error("Error parsing predictive charging time slot: %s", e)
+            except (KeyError, ValueError, TypeError) as exc:
+                _LOGGER.error("Invalid predictive time slot: %s", exc)
                 continue
-            if self._time_in_window(current_time, start_time, end_time):
+            selected_days = slot.get("days", [])
+            if start_time <= end_time:
+                active = today in selected_days and start_time <= current_time < end_time
+            else:
+                active = (
+                    (today in selected_days and current_time >= start_time)
+                    or (yesterday in selected_days and current_time < end_time)
+                )
+            if active:
                 return slot
         return None
 
@@ -6379,6 +6396,15 @@ class ChargeDischargeController:
         the battery in a positive charging state. A confirmed hard overload still
         hands control to demand protection.
         """
+        from .control.edf_tempo import is_tempo_offpeak
+        if not is_tempo_offpeak(dt_util.now()):
+            # Hard HC gate for Time Slot, Dynamic Pricing and Real-Time Price.
+            # PhaseRuntime separately releases its owned battery setpoints.
+            self.grid_charging_active = False
+            self._grid_charging_initialized = False
+            self._phase_predictive_targets = {}
+            return
+
         consumption_state = self.hass.states.get(self.consumption_sensor)
         sensor_raw = self._apply_meter_transform(consumption_state)
         if sensor_raw is None:

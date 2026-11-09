@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 
 from custom_components.omnibattery.control.edf_tempo import (
     TempoSnapshot, plan_tempo, normalize_color, phase_tempo_charge_request,
+    is_tempo_offpeak,
     read_tempo_snapshot,
 )
 
@@ -155,3 +156,18 @@ def test_rte_disagreement_refuses_next_night_charge():
     assert snap.tomorrow is None
     assert snap.warning == "tomorrow_color_conflict"
     assert plan_tempo(now, snap).mode == "normal"
+
+
+def test_tempo_offpeak_exact_boundaries():
+    assert not is_tempo_offpeak(at(9, 21, 59))
+    assert is_tempo_offpeak(at(9, 22, 0))
+    assert is_tempo_offpeak(at(10, 0, 0))
+    assert is_tempo_offpeak(at(10, 5, 59))
+    assert not is_tempo_offpeak(at(10, 6, 0))
+    assert not is_tempo_offpeak(at(10, 12, 0))
+
+
+def test_tempo_offpeak_rejects_naive_datetimes():
+    import pytest
+    with pytest.raises(ValueError):
+        is_tempo_offpeak(datetime(2026, 11, 9, 23))

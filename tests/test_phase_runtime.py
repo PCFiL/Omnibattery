@@ -1,6 +1,8 @@
 """Phase dispatch tests with fake Home Assistant coordinators."""
 from types import SimpleNamespace
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from homeassistant.util import dt as dt_util
 
 import pytest
 
@@ -167,6 +169,15 @@ async def test_weekly_preserves_discharge_when_release_would_overload_grid():
     assert runtime.safety_status["L3"] == "weekly_waiting_discharge_release_headroom"
 
 
+@pytest.fixture
+def hc_clock(monkeypatch):
+    # Time Slot target tests exercise authorised Tempo HC hours.
+    monkeypatch.setattr(
+        dt_util, "now",
+        lambda: datetime(2026, 11, 9, 23, 30, tzinfo=ZoneInfo("Europe/Paris"))
+    )
+
+
 def _enable_phase_predictive(ctl, target=65.0):
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = False
@@ -184,7 +195,7 @@ def _enable_phase_predictive(ctl, target=65.0):
 
 
 @pytest.mark.asyncio
-async def test_solar_predictive_phase_owned_charge_uses_existing_phase_writer():
+async def test_solar_predictive_phase_owned_charge_uses_existing_phase_writer(hc_clock):
     ctl = FakeController(sensor_value="300")
     _enable_phase_predictive(ctl, 65)
     runtime = PhaseRuntime(ctl)
@@ -198,7 +209,7 @@ async def test_solar_predictive_phase_owned_charge_uses_existing_phase_writer():
 
 
 @pytest.mark.asyncio
-async def test_predictive_soc_target_reached_releases_phase_to_normal_pd():
+async def test_predictive_soc_target_reached_releases_phase_to_normal_pd(hc_clock):
     ctl = FakeController(sensor_value="300")
     _enable_phase_predictive(ctl, 65)
     ctl.coordinators[0].data["battery_soc"] = 66
@@ -211,7 +222,7 @@ async def test_predictive_soc_target_reached_releases_phase_to_normal_pd():
 
 
 @pytest.mark.asyncio
-async def test_tempo_precedes_solar_prediction_and_weekly():
+async def test_tempo_precedes_solar_prediction_and_weekly(hc_clock):
     ctl = FakeController(sensor_value="300")
     _enable_phase_predictive(ctl, 65)
     ctl._tempo_charge_active = True
@@ -225,7 +236,7 @@ async def test_tempo_precedes_solar_prediction_and_weekly():
 
 
 @pytest.mark.asyncio
-async def test_weekly_precedes_solar_prediction():
+async def test_weekly_precedes_solar_prediction(hc_clock):
     ctl = FakeController(sensor_value="300")
     _enable_phase_predictive(ctl, 65)
     ctl.weekly_full_charge_enabled = True
@@ -238,7 +249,7 @@ async def test_weekly_precedes_solar_prediction():
 
 
 @pytest.mark.asyncio
-async def test_predictive_respects_charge_blockers():
+async def test_predictive_respects_charge_blockers(hc_clock):
     ctl = FakeController(sensor_value="300")
     _enable_phase_predictive(ctl, 65)
     ctl.get_charge_blockers = lambda c: {"user_disabled": "off"}
@@ -247,3 +258,37 @@ async def test_predictive_respects_charge_blockers():
     runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
     await runtime.run()
     assert ctl.writes[-1][1] == 0
+
+
+@pytest.mark.asyncio
+async def test_phase_predictive_never_grid_charges_at_0600(monkeypatch):
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    monkeypatch.setattr(dt_util, "now", lambda: datetime(
+        2026, 11, 10, 6, 0, tzinfo=ZoneInfo("Europe/Paris")
+    ))
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] == 0
+    assert runtime.safety_status["L3"] != "predictive_charge_command_accepted"
+
+
+@pytest.mark.asyncio
+async def test_phase_predictive_charge_stopped_when_0600_arrives(monkeypatch, hc_clock):
+    ctl = FakeController(sensor_value="300")
+    _enable_phase_predictive(ctl, 65)
+    runtime = PhaseRuntime(ctl)
+    await runtime.run()
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] > 0
+    monkeypatch.setattr(dt_util, "now", lambda: datetime(
+        2026, 11, 10, 6, 0, tzinfo=ZoneInfo("Europe/Paris")
+    ))
+    runtime.manager.planner.states["mix_ac_1"].last_command_at -= 6
+    await runtime.run()
+    assert ctl.writes[-1][1] == 0
+    assert ctl.writes[-1][2] == 0
+    assert runtime.safety_status["L3"] == "predictive_released"
