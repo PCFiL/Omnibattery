@@ -245,6 +245,111 @@ def _period_energy_kwh(raw: dict[str, Any]) -> float | None:
     return value if math.isfinite(value) and value >= 0.0 else None
 
 
+def _arome_companion_entity(source_entity_id: str, destination: str) -> str | None:
+    """Find companion AROME sensors under the *same* config-entry name.
+
+    Do not mix forecasts from other installations or unrelated entities.
+    French and English sensor ids are supported.
+    """
+    if not isinstance(source_entity_id, str) or not source_entity_id.startswith("sensor."):
+        return None
+    for suffix in (
+        "_energie_aujourd_hui", "_energie_restante_aujourd_hui",
+        "_energy_today", "_energy_remaining_today",
+    ):
+        if source_entity_id.endswith(suffix) and "arome_solar_forecast" in source_entity_id:
+            prefix = source_entity_id[: -len(suffix)]
+            if destination == "today":
+                ending = "_energie_aujourd_hui" if "_energie_" in suffix else "_energy_today"
+            else:
+                ending = "_energie_demain" if "_energie_" in suffix else "_energy_tomorrow"
+            return prefix + ending
+    return None
+
+
+def _arome_power_periods(state: Any, *, day: date) -> tuple[SolarForecastPeriod, ...]:
+    """Convert AROME/Solcast-compatible average kW into dated kWh intervals.
+
+    Prefer the quarter-hour curve. Use a fixed advertised resolution so a
+    missing sample cannot be stretched into an invented hour of production.
+    Reject missing/invalid timestamps, negative/non-finite power and duplicate
+    periods rather than trusting an incomplete list.
+    """
+    if state is None or getattr(state, "state", None) in ("unavailable", "unknown"):
+        return ()
+    attrs = getattr(state, "attributes", {}) or {}
+    # AROME marks an incomplete forecast day explicitly.
+    if attrs.get("complete") is False:
+        return ()
+    for key, width_s in (("detailedForecast15", 900), ("detailedForecast", 1800)):
+        raw = attrs.get(key)
+        if not isinstance(raw, (list, tuple)) or not raw:
+            continue
+        intervals: list[SolarForecastPeriod] = []
+        seen: set[float] = set()
+        valid = True
+        for item in raw:
+            if not isinstance(item, dict):
+                valid = False
+                break
+            start = _parse_period_timestamp(item.get("period_start"))
+            try:
+                kw = float(item.get("pv_estimate"))
+            except (TypeError, ValueError):
+                valid = False
+                break
+            if start is None or not math.isfinite(kw) or kw < 0:
+                valid = False
+                break
+            if start.date() != day:
+                # In AROME sensor data the timestamp is explicitly local (+01
+                # / +02), and day identity is tied to that local timestamp.
+                valid = False
+                break
+            epoch = start.timestamp()
+            if epoch in seen:
+                valid = False
+                break
+            seen.add(epoch)
+            end = datetime.fromtimestamp(epoch + width_s, tz=start.tzinfo)
+            try:
+                intervals.append(SolarForecastPeriod(start, end, kw * width_s / 3600.0))
+            except ValueError:
+                valid = False
+                break
+        if valid and intervals:
+            intervals.sort(key=lambda p: p.start.timestamp())
+            return tuple(intervals)
+    return ()
+
+
+def _arome_dated_periods(
+    hass: Any, source_entity_id: str,
+) -> tuple[SolarForecastPeriod, ...]:
+    """Join matching AROME today/tomorrow sensor curves, not their kWh totals."""
+    today_id = _arome_companion_entity(source_entity_id, "today")
+    tomorrow_id = _arome_companion_entity(source_entity_id, "tomorrow")
+    if not today_id or not tomorrow_id:
+        return ()
+    today_state = hass.states.get(today_id)
+    tomorrow_state = hass.states.get(tomorrow_id)
+    # Match the provider's civil-day curve against Home Assistant's configured
+    # timezone. Do not mistake a stale yesterday curve for today's forecast.
+    timezone_name = getattr(getattr(hass, "config", None), "time_zone", None)
+    try:
+        local_tz = ZoneInfo(str(timezone_name)) if timezone_name else datetime.now().astimezone().tzinfo
+    except (KeyError, ValueError):
+        return ()
+    today = datetime.now(local_tz).date()
+    today_periods = _arome_power_periods(today_state, day=today)
+    tomorrow_periods = _arome_power_periods(
+        tomorrow_state, day=today + timedelta(days=1)
+    )
+    if not today_periods:
+        return ()
+    return today_periods + tomorrow_periods
+
+
 def _extract_forecast_periods(state: Any) -> tuple[SolarForecastPeriod, ...]:
     """Adapt the small set of explicit period schemas supported by the contract.
 
@@ -309,7 +414,11 @@ def read_solar_forecast_kwh(
                 value,
                 source,
                 sensor,
-                periods=_extract_forecast_periods(state),
+                periods=(
+                    _arome_dated_periods(hass, sensor)
+                    if "arome_solar_forecast" in sensor
+                    else _extract_forecast_periods(state)
+                ),
                 conversion="none",
             )
             # Most control callers retain the source for diagnostics. Dashboard
