@@ -30,6 +30,7 @@ from .const import (
     CONF_WEEKLY_FULL_CHARGE_SKIP_DELAY,
     CONF_FULL_CHARGE_VOLTAGE_TAPER_ENABLED,
     CONF_MANUAL_MODE_ENABLED,
+    CONF_EV_CHARGING_PAUSE_ENABLED,
     CONF_BATTERY_MANUAL_MODE_ENABLED,
     CONF_NO_PD_MODE_ENABLED,
     CONF_OFFGRID_POWER_SENSOR,
@@ -90,6 +91,7 @@ async def async_setup_entry(
     # Add manual mode switch (system-level, always present)
     if controller:
         entities.append(ManualModeSwitch(hass, entry, controller))
+        entities.append(EvChargingPauseSwitch(hass, entry, controller))
         entities.append(NoPdModeSwitch(hass, entry, controller))
         if entry.data.get(CONF_OFFGRID_POWER_SENSOR):
             entities.append(OffgridModeSwitch(hass, entry, controller))
@@ -1452,6 +1454,78 @@ class ExcludedDeviceCoverHomeSwitch(SwitchEntity):
     @property
     def device_info(self):
         """Return device information for the system."""
+        return {
+            "identifiers": {(DOMAIN, "marstek_venus_system")},
+            "name": "Omnibattery System",
+            "manufacturer": "Omnibattery",
+            "model": "Multi-Battery System",
+        }
+
+
+class EvChargingPauseSwitch(SwitchEntity):
+    """Fleet-wide, persistent zero-power interlock for EV charging."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
+        self.hass = hass
+        self.entry = entry
+        self.controller = controller
+        self._attr_has_entity_name = True
+        self._attr_translation_key = "ev_charging_pause"
+        self._attr_unique_id = f"{SYSTEM_UNIQUE_ID_PREFIX}ev_charging_pause"
+        self.entity_id = system_entity_id("switch", "ev_charging_pause")
+        self._attr_icon = "mdi:car-electric"
+        self._attr_should_poll = False
+
+    @property
+    def is_on(self) -> bool:
+        return self.controller.ev_charging_pause_enabled
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "stop_confirmed": dict(self.controller.ev_pause_stop_confirmed),
+            "all_stopped_confirmed": (
+                bool(self.controller.ev_pause_stop_confirmed)
+                and all(self.controller.ev_pause_stop_confirmed.values())
+                and len(self.controller.ev_pause_stop_confirmed) == len(self.controller.coordinators)
+            ),
+        }
+
+    async def async_turn_on(self, **kwargs) -> None:
+        # Assert/persist before taking the controller lock so an in-flight
+        # control cycle sees the interlock at the coordinator write boundary.
+        self.controller.ev_charging_pause_enabled = True
+        new_data = dict(self.entry.data)
+        new_data[CONF_EV_CHARGING_PAUSE_ENABLED] = True
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        async with self.controller._control_lock:
+            confirmed = await self.controller._enforce_ev_charging_pause(force=True)
+        self.async_write_ha_state()
+        if not confirmed:
+            raise HomeAssistantError(
+                "EV charging pause is active, but one or more battery stops "
+                "could not be confirmed. Check battery telemetry before charging the EV."
+            )
+
+    async def async_turn_off(self, **kwargs) -> None:
+        async with self.controller._control_lock:
+            # Keep the interlock asserted until every running write has settled.
+            self.controller.ev_charging_pause_enabled = False
+            self.controller.ev_pause_stop_confirmed.clear()
+            self.controller._ev_pause_last_stop_attempt.clear()
+            self.controller.error_integral = 0.0
+            self.controller.previous_error = 0.0
+            self.controller.sign_changes = 0
+            self.controller._active_charge_batteries = []
+            self.controller._active_discharge_batteries = []
+            new_data = dict(self.entry.data)
+            new_data[CONF_EV_CHARGING_PAUSE_ENABLED] = False
+            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        self.controller.schedule_control_cycle()
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
         return {
             "identifiers": {(DOMAIN, "marstek_venus_system")},
             "name": "Omnibattery System",
