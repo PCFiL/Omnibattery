@@ -1085,6 +1085,9 @@ class MarstekManualSetPowerNumber(CoordinatorEntity, NumberEntity):
         The optimistic commanded update avoids the slider snapping back to the
         old value before the next control cycle re-asserts it.
         """
+        controller = getattr(self.coordinator, "_ev_charging_pause_controller", None)
+        if controller is not None and controller.ev_charging_pause_enabled:
+            raise ServiceValidationError("EV charging pause is active: manual power changes are locked")
         new_value = max(0, min(int(value), int(self.native_max_value)))
         if self._kind == "charge":
             self.coordinator.manual_set_charge_power = new_value
