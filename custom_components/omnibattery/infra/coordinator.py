@@ -1759,6 +1759,13 @@ class MarstekVenusDataUpdateCoordinator(DataUpdateCoordinator):
 
         success = False
         async with self.lock:
+            controller = getattr(self, "_ev_charging_pause_controller", None)
+            if controller is not None and controller.ev_charging_pause_enabled:
+                # Register-based manual commands must not bypass the AC power
+                # interlock enforced by apply_power().
+                if (key in ("set_charge_power", "set_discharge_power") and int(value) > 0) or (key == "force_mode" and int(value) != 0):
+                    _LOGGER.warning("[%s] EV pause blocked direct control %s=%s", self.name, key, value)
+                    return False
             try:
                 success = await self.driver.write_control(key, value)
                 if not success:
