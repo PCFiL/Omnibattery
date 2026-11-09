@@ -4,28 +4,91 @@ on:
   push:
     branches: [main, 'release/**']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   pytest:
+    name: ${{ matrix.suite }} (Python 3.14)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, ha-flows, historical-regressions, phase-transitions]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - name: Record tested revision
+        run: |
+          mkdir -p test-results
+          git rev-parse HEAD > test-results/commit.txt
+          python --version > test-results/python.txt
       - name: Install test dependencies
-        run: pip install -r requirements-test.txt
-      # pytest.ini disables the Home Assistant plugin: its autouse fixtures run
-      # for every test, and `enable_event_loop_debug` calls
-      # asyncio.get_event_loop() where a sync test has no loop, which errors the
-      # whole suite at setup. So the unit tests run without it...
-      - name: Run unit tests
-        run: pytest
-
-      # ...and the tests that ask for the `hass` fixture run as their own step
-      # with the plugin loaded. Every test in these files is async, so the
-      # autouse fixtures find the loop they expect. A new `hass`-based test in
-      # some other file is skipped by tests/conftest.py in the step above and
-      # says so ("needs the HA test plugin"); add its file here.
-      - name: Run Home Assistant flow tests
-        run: pytest -o addopts="" tests/test_config_backup.py tests/test_domain_migration.py tests/test_system_uid_migration.py
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip freeze > test-results/dependencies.txt
+      - name: Run selected suite
+        shell: bash
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          report="test-results/${TEST_SUITE}.xml"
+          case "$TEST_SUITE" in
+            unit)
+              # pytest.ini disables the HA plugin's autouse fixtures, NOT
+              # the real HA modules. Tests requiring hass run in ha-flows.
+              python -m pytest -ra --junitxml="$report"
+              ;;
+            ha-flows)
+              # Separate job: a unit failure must never hide the HA flows.
+              # Only async hass-fixture files belong here; see pytest.ini.
+              python -m pytest -o addopts="" -ra --junitxml="$report" \
+                tests/test_config_backup.py \
+                tests/test_domain_migration.py \
+                tests/test_system_uid_migration.py
+              ;;
+            historical-regressions)
+              # Explicit proof that all four historical failures are exercised
+              # with the actual controller and installed HA dependencies.
+              python -m pytest -v --junitxml="$report" \
+                tests/test_battery_manual_mode.py::test_automatic_power_write_is_rejected_for_manual_battery \
+                tests/test_control_cycle_scheduling.py::test_the_safety_timer_is_never_paced \
+                tests/test_phase_live_safety.py::test_both_meter_sources_unavailable_freezes_correction \
+                tests/test_phase_meter_fallback.py::test_distinct_phases_never_cross
+              ;;
+            phase-transitions)
+              # These runtime tests need HA imports. Keep them OUT of the
+              # dependency-free runner, but always run them here and in unit.
+              # They simulate device I/O; no live installation is contacted.
+              python -m pytest -v --junitxml="$report" \
+                tests/test_phase_runtime.py \
+                tests/test_phase_live_safety.py \
+                tests/test_phase_dual_meter_stop.py \
+                tests/test_phase_safety_regressions.py \
+                tests/test_command_ownership.py \
+                tests/test_battery_manual_mode.py \
+                tests/test_control_cycle_scheduling.py
+              ;;
+            *)
+              echo "Unknown test suite: $TEST_SUITE" >&2
+              exit 2
+              ;;
+          esac
+      - name: Upload test reports and environment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14

@@ -81,10 +81,12 @@ def test_distinct_phases_never_cross():
     })
     for phase, expected in (("L1", 100), ("L2", 200), ("L3", 300)):
         result = select_phase_meter(
-            readings, phase=phase, primary_entity_id=MQTT_PRIMARY[phase], now=NOW,
+            readings, phase=phase, primary_entity_id=MQTT_PRIMARY[phase],
+            fallback_entity_id=NATIVE_FALLBACK[phase], now=NOW,
         )
         assert result.source == "fallback"
         assert result.reading.power_w == expected
+        assert result.entity_id == NATIVE_FALLBACK[phase]
 
 
 def test_wrong_unit_cannot_pass():

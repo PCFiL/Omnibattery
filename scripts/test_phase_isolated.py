@@ -1,7 +1,9 @@
-"""Run phase-control unit tests without importing Home Assistant.
+"""Run pure phase-control tests without importing Home Assistant.
 
-This deliberately tests only the pure control modules. It is NOT a replacement
-for Home Assistant integration or physical battery validation.
+Runtime/dispatcher tests import HA and run in the Python 3.14 Tests workflow
+(unit and phase-transitions jobs). Do not add HA clock/package stubs here:
+that would conceal dependency failures in the full integration environment.
+Neither this runner nor the simulated runtime tests validate physical batteries.
 """
 from __future__ import annotations
 
@@ -22,6 +24,9 @@ for name, path in (
     package.__path__ = [str(path)]
     sys.modules[name] = package
 
+# test_phase_runtime.py, test_phase_live_safety.py and
+# test_phase_dual_meter_stop.py now require HA. They are explicitly exercised
+# by the phase-transitions CI job alongside test_phase_safety_regressions.py.
 raise SystemExit(pytest.main([
     "--noconftest",
     "-q",
@@ -33,9 +38,6 @@ raise SystemExit(pytest.main([
         "test_phase_dispatch_safety.py",
         "test_command_ownership.py",
         "test_phase_pd_derivative.py",
-        "test_phase_runtime.py",
-        "test_phase_live_safety.py",
-        "test_phase_dual_meter_stop.py",
         "test_phase_performance.py",
         "test_phase_eligibility.py",
         "test_weekly_charge_window.py",

@@ -39,6 +39,7 @@ class FakeController:
             get=lambda eid: self.values.get(eid)
         ))
         self.manual_mode_enabled = False
+        self.ev_charging_pause_enabled = False
         self.manual_battery = False
         self.backup = False
         self.slot = False
@@ -76,7 +77,9 @@ async def test_zero_handoff_before_phase_power_request():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guard", ["manual_mode_enabled", "manual_battery", "backup", "slot"])
+@pytest.mark.parametrize("guard", [
+    "manual_mode_enabled", "ev_charging_pause_enabled", "manual_battery", "backup", "slot",
+])
 async def test_other_owners_prevent_writes(guard):
     ctl = FakeController()
     setattr(ctl, guard, True)
@@ -127,7 +130,11 @@ async def test_both_meter_sources_unavailable_freezes_correction():
     ctl.values["sensor.grid_l2"] = meter(500, stale=True)
     runtime.manager.planner.states["mix_pro_2"].last_command_at -= 6
     await runtime.run()
-    assert ctl.writes == [(0, 0, "phase:L2")]
+    # A new sensor fault needs a fresh hardware stop, not the startup ACK.
+    assert ctl.writes == [(0, 0, "phase:L2"), (0, 0, "phase:L2")]
+    assert runtime.safety_status["L2"] == "meter_lost_stop_command_accepted"
+    await runtime.run()  # The acknowledged stop is not flooded onto the bus.
+    assert len(ctl.writes) == 2
 
 
 @pytest.mark.asyncio

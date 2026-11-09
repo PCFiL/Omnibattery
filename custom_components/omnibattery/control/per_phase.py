@@ -73,6 +73,13 @@ class PerPhasePlanner:
         timestamp = monotonic() if now is None else now
         if not isfinite(timestamp):
             raise ValueError("Invalid time")
+        # A running command must obey a newly lowered ceiling immediately.
+        # Deadband and pacing suppress regulation noise, never a safety
+        # reduction (including a blocker setting the allowed power to zero).
+        limited = max(-max_discharge_w, min(max_charge_w, state.last_command_w))
+        if limited != state.last_command_w:
+            state.pending_error = grid_w - assignment.target_w
+            return limited
         if (
             state.last_command_at is not None
             and timestamp - state.last_command_at

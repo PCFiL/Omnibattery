@@ -51,16 +51,18 @@ def _controller_with_reset(**overrides):
 
 @pytest.mark.asyncio
 async def test_automatic_power_write_is_rejected_for_manual_battery():
-    coordinator = SimpleNamespace(
+    coordinator = HashableNamespace(
         name="Manual A",
         battery_manual_mode_enabled=True,
+        apply_power=AsyncMock(),
     )
 
     result = await ChargeDischargeController._set_battery_power(
-        SimpleNamespace(), coordinator, 500, 0
+        SimpleNamespace(ev_charging_pause_enabled=False), coordinator, 500, 0
     )
 
     assert result is False
+    coordinator.apply_power.assert_not_awaited()
 
 
 @pytest.mark.asyncio

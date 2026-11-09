@@ -69,6 +69,7 @@ def _paced_controller(runs):
         _last_cycle_monotonic=time.monotonic(),
         _control_lock=asyncio.Lock(),
         _phase_safety_pending=True,
+        _phase_runtime=None,
         _run_control_cycle=_run,
     )
 

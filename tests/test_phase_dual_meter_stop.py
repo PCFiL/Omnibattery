@@ -29,6 +29,7 @@ class FakeController:
         self.samples = {"sensor.primary_l1": meter(600), "sensor.backup_l1": meter(610)}
         self.hass = SimpleNamespace(states=SimpleNamespace(get=lambda key: self.samples.get(key)))
         self.manual_mode_enabled = False
+        self.ev_charging_pause_enabled = False
         self.writes = []
         self.accept = True
 
