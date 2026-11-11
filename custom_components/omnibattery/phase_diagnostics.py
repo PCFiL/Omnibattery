@@ -288,4 +288,7 @@ def create_phase_diagnostic_entities(hass, entry, coordinators):
             entities.append(PhaseDryRunMetricSensor(
                 hass, entry, phase, coordinators, metric
             ))
+    # A separate read-only sensor owns the next-HC projection and its profile.
+    from .sensors.tempo_preview import TempoPreviewSensor
+    entities.append(TempoPreviewSensor(hass, entry, coordinators))
     return entities
