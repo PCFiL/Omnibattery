@@ -13,11 +13,12 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from ..const import DOMAIN
+from ..phase_recovery_config import config_snapshot, register_recovery_api
 from ..forecast.phase_profile import PhaseShareProfile
 from ..forecast.tempo_adapter import build_snapshot, live_phase_loads, topology
 
 _LOGGER = logging.getLogger(__name__)
-MODULE_URL = "/omnibattery_static/tempo-preview.js?v=1"
+MODULE_URL = "/omnibattery_static/tempo-preview.js?v=2"
 FRONTEND_USERS = "_tempo_preview_frontend_entries"
 
 
@@ -45,6 +46,8 @@ class TempoPreviewSensor(SensorEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+        register_recovery_api(self.hass)
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry.entry_id, {})["tempo_preview_refresh"] = self._refresh
         try:
             self._profile.load(await self._store.async_load())
         except Exception:  # Display/profile persistence must not stop HA setup.
@@ -100,6 +103,10 @@ class TempoPreviewSensor(SensorEntity):
                 self._snapshot = {"preview_kind": "tempo_hc_v1", "config_entry_id": self.entry.entry_id,
                                   "calculated_at": now.isoformat(), "error": "preview_error",
                                   "command_sent": False}
+        # Configuration remains accessible even when solar forecasts fail.
+        # Export only current state; never update recovery latches from a view.
+        self._snapshot["recovery_config"] = config_snapshot(self.hass, self.entry)
+        self._snapshot["tempo_full_charge_enabled"] = bool(getattr(controller, "tempo_grid_charge_enabled", False))
         self._last_calculation = monotonic()
         self.async_write_ha_state()
 
@@ -113,6 +120,9 @@ class TempoPreviewSensor(SensorEntity):
 
     async def async_will_remove_from_hass(self):
         self._removed = True
+        data = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {})
+        if data.get("tempo_preview_refresh") == self._refresh:
+            data.pop("tempo_preview_refresh", None)
         if self._pending is not None:
             self._pending()
             self._pending = None

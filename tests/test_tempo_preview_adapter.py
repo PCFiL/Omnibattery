@@ -114,8 +114,22 @@ def test_stale_provider_curve_not_reused_as_current_forecast(env):
 
 
 def test_incomplete_day_not_silently_filled_with_zero(env):
-    env.values[env.tomorrow].attributes["complete"] = False
+    attrs = env.values[env.tomorrow].attributes
+    attrs["complete"] = False
+    # The flag alone may mean only past data is absent. Remove an actual
+    # required future hour: it must still NOT be silently filled with zero.
+    attrs["detailedForecast15"] = [p for p in attrs["detailedForecast15"]
+        if datetime.fromisoformat(p["period_start"]).hour != 12]
     assert build(env)["next_window"]["status"] == "unavailable"
+
+
+def test_partial_flag_with_complete_future_samples_is_accepted(env):
+    attrs = env.values[env.source].attributes
+    attrs["complete"] = False
+    attrs["detailedForecast15"] = [p for p in attrs["detailedForecast15"]
+        if datetime.fromisoformat(p["period_start"]) >= env.now]
+    assert build(env)["next_window"]["status"] != "unavailable"
+    assert attrs["complete"] is False
 
 
 def test_current_window_does_not_require_day_after_tomorrow(env):

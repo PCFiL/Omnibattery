@@ -203,7 +203,7 @@ def preview_window(
     *, now: datetime, window: Window, batteries: Sequence[Battery], items: Sequence[Slice],
     reason: str, charge_eff: float, discharge_eff: float, grid_limit_kw: float,
     phase_limit_kw: float, global_budget: Callable | None = None,
-    enabled=True, pause=False, floor_pct=0.0,
+    enabled=True, pause=False, floor_pct=0.0, recovery_settings=None, recovery_pending=None,
 ):
     """Return an immutable-input projection and feasibility upper bound.
 
@@ -279,8 +279,34 @@ def preview_window(
             if b.active_target is not None and not b.block:
                 requested[i] = max(0.0, min(caps[i], b.capacity * b.active_target / 100 - start_energy[i]))
     desired = list(requested)
-    if not enabled or pause:
-        requested = [0.0] * len(batteries)
+    row_enabled = [bool(enabled)] * len(batteries)
+    row_reasons = [reason] * len(batteries)
+    recovery_targets = [None] * len(batteries)
+    # A phase-local safety floor is a minimum, not additional energy counted
+    # on top of the predictive target. It works even with prediction disabled.
+    if recovery_settings and not forced:
+        from ..control.phase_soc_recovery import RecoverySettings, decide_recovery
+        if not enabled:
+            desired = [0.0] * len(batteries)
+            budget = 0.0
+        for i, b in enumerate(batteries):
+            cfg = recovery_settings.get(b.phase, RecoverySettings())
+            row_enabled[i] = bool(enabled or cfg.enabled)
+            decision = decide_recovery(cfg, start_energy[i] / b.capacity * 100,
+                pending=bool(current and (recovery_pending or {}).get(b.phase)),
+                offpeak=True, max_soc=b.maximum, blocked=bool(b.block))
+            if decision.target_soc is None:
+                continue
+            recovery_targets[i] = decision.target_soc
+            minimum_charge = max(0.0, min(caps[i],
+                b.capacity * decision.target_soc / 100 - start_energy[i]))
+            increment = max(0.0, minimum_charge - desired[i])
+            if minimum_charge >= desired[i]:
+                row_reasons[i] = "soc_recovery"
+            desired[i] += increment
+            budget += increment
+    requested = [want if active and not pause else 0.0
+                 for want, active in zip(desired, row_enabled)]
     delivered = [0.0] * len(batteries)
     # Conservative headroom: never credit a forecast export on another phase
     # as import capacity. House power has priority over battery charging.
@@ -298,13 +324,14 @@ def preview_window(
     rows = []
     for i, b in enumerate(batteries):
         missing = max(0.0, requested[i] - delivered[i])
-        state = (b.block or ("paused_ev" if pause else "disabled" if not enabled else
+        state = (b.block or ("paused_ev" if pause else "disabled" if not row_enabled[i] else
                  "limited" if missing > 0.05 else "target_reached" if current and desired[i] <= 0.01
                  else "charging" if current and (b.measured_charge_w or 0) > 50
-                 else "phase_constraint" if needs[i] - desired[i] > 0.05
+                 else "phase_constraint" if enabled and needs[i] - desired[i] > 0.05
                  else "planned" if desired[i] > 0.01 else "not_needed"))
         rows.append({
-            "phase": b.phase, "battery": b.name, "status": state, "reason": reason,
+            "phase": b.phase, "battery": b.name, "status": state, "reason": row_reasons[i],
+            "recovery_target_soc": recovery_targets[i],
             "soc_now": round(b.soc, 1),
             "soc_start": None if b.block else round(start_energy[i] / b.capacity * 100, 1),
             "soc_target": None if b.block else round((start_energy[i] + desired[i]) / b.capacity * 100, 1),
@@ -317,7 +344,7 @@ def preview_window(
             "phase_need_uncovered_kwh": round(max(0.0, needs[i] - desired[i]), 3),
         })
     statuses = {r["status"] for r in rows}
-    overall = ("paused_ev" if pause else "disabled" if not enabled else
+    overall = ("paused_ev" if pause else "disabled" if not any(row_enabled) else
                "excluded" if batteries and all(b.block for b in batteries) else
                "limited" if "limited" in statuses or budget - sum(desired) > 0.05 else
                "phase_constraint" if "phase_constraint" in statuses else "partial" if any(b.block for b in batteries)

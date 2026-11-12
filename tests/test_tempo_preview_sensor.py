@@ -21,6 +21,8 @@ def harness(monkeypatch):
     manager = Manager()
     hass = SimpleNamespace(data={sensor.DOMAIN: {}, sensor.frontend.DATA_EXTRA_MODULE_URL: manager})
     stores, callbacks = [], []
+    api = Mock()
+    monkeypatch.setattr(sensor, "register_recovery_api", api)
     def storage(*args):
         obj = SimpleNamespace(async_load=AsyncMock(return_value=None),
             async_save=AsyncMock(), async_delay_save=Mock())
@@ -45,7 +47,7 @@ def harness(monkeypatch):
         entity.async_on_remove = Mock()
         entity.async_write_ha_state = Mock()
         return entity
-    return SimpleNamespace(create=create,hass=hass,manager=manager,build=build,stores=stores,callbacks=callbacks)
+    return SimpleNamespace(create=create,hass=hass,manager=manager,build=build,stores=stores,callbacks=callbacks,api=api)
 
 
 @pytest.mark.asyncio
@@ -56,6 +58,9 @@ async def test_sensor_setup_registers_once_and_builds_snapshot(harness):
     assert entity.extra_state_attributes["command_sent"] is False
     assert sensor.MODULE_URL in harness.manager.urls
     assert harness.build.call_count == 1
+    harness.api.assert_called_once_with(harness.hass)
+    assert entity.extra_state_attributes["recovery_config"]["L3"]["enabled"] is False
+    assert entity.extra_state_attributes["recovery_config"]["L3"]["start_soc"] == 8
     entity.coordinators[0].async_add_listener.assert_called_once()
     harness.stores[0].async_delay_save.assert_called_once()
 
@@ -67,6 +72,8 @@ async def test_frontend_module_refcount_preserves_second_entry(harness):
     assert len(harness.manager.urls) == 1
     await first.async_will_remove_from_hass()
     assert sensor.MODULE_URL in harness.manager.urls
+    assert "tempo_preview_refresh" not in harness.hass.data[sensor.DOMAIN]["one"]
+    assert "tempo_preview_refresh" in harness.hass.data[sensor.DOMAIN]["two"]
     await second.async_will_remove_from_hass()
     assert sensor.MODULE_URL not in harness.manager.urls
     for store in harness.stores: store.async_save.assert_awaited_once()
@@ -92,6 +99,7 @@ async def test_bad_forecast_does_not_break_sensor_or_control(harness):
     assert entity.native_value == "unavailable"
     assert entity.extra_state_attributes["error"] == "preview_error"
     assert entity.extra_state_attributes["command_sent"] is False
+    assert "recovery_config" in entity.extra_state_attributes
     entity.async_write_ha_state.assert_called_once()
 
 

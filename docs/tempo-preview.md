@@ -1,125 +1,134 @@
-# Prévision de recharge Tempo par phase
+# Prévision Tempo sur les batteries et recharge minimale par phase
 
-## Emplacement et activation
+## Mise à jour et affichage
 
-Mettre à jour l'intégration depuis `main`, redémarrer Home Assistant puis
-actualiser complètement le navigateur. Dans **Omnibattery → Contrôle → Charge
-prédictive**, un bloc **Prochaine recharge · heures creuses Tempo** apparaît.
-Aucun YAML Lovelace ni nouvelle automatisation n'est nécessaire.
+Installer l'intégration depuis `main`, redémarrer Home Assistant puis recharger
+complètement le navigateur (le module frontend passe à `tempo-preview.js?v=2`).
+Aucun YAML, blueprint ou binding supplémentaire n'est nécessaire.
 
-Un capteur **Tempo charge preview**, identifié par l'entrée de configuration,
-porte les attributs `current_window` et `next_window`. Le premier désigne le
-créneau en cours (reste à charger), le second le créneau strictement suivant.
-Les lignes sont ordonnées P1/P2/P3 et utilisent les associations batterie/phase
-existantes ; elles ne sont pas codées en dur pour des numéros de série.
+Dans **Omnibattery → Batteries**, chaque batterie possède maintenant un encart
+**Prochaine recharge HC**, sous Santé et cellules / Hystérésis, avant Énergie
+aujourd'hui. Le grand tableau a été retiré de Contrôle.
 
-La projection est séparée du pilotage : elle ne remplace ni le calendrier actif,
-ni les objectifs SOC exécutés, et n'appelle aucune commande matérielle. Un SOC
-cible futur affiché est une estimation, pas la promesse que la régulation le
-sélectionnera au début de la nuit. La cible active, lorsqu'elle existe pendant
-le créneau courant, est conservée dans `runtime_target_soc`.
+La valeur principale est l'**énergie estimée chargeable dans la batterie**, en
+**kWh**, pour le prochain créneau Tempo **22:00 → 06:00 Europe/Paris**. Il ne
+s'agit pas d'une puissance en kW. Les détails indiquent le besoin, le prélèvement
+réseau estimé avec pertes, le motif, la qualité des données et le dernier calcul.
+Le SOC de départ est projeté jusqu'au début des HC. Pendant une plage HC,
+le reste à charger dans la plage en cours est séparé de la plage suivante.
 
-## Calcul et données
+Une donnée manquante reste **— kWh / Indisponible**, jamais un faux zéro.
+Les batteries sont rapprochées des prévisions par entrée HA et identité/phase ;
+un nom modifié par l'utilisateur ne doit pas mélanger deux installations.
 
-- Fenêtre Tempo 22:00 inclus → 06:00 exclus, Europe/Paris. Les durées sont
-  calculées en UTC : 7/9 heures lors des changements d'heure, pas toujours 8.
-- Le SOC de départ est projeté depuis le SOC actuel et les flux de consommation
-  et de production jusqu'au début de la fenêtre, avec seuils SOC et puissances.
-- Le profil global existant de consommation est utilisé par dates et quarts
-  d'heure. Un seul budget global utilise le calcul pur des échéances
-  `pricing.chronological.build_energy_deadlines`, puis il est réparti par phase.
-- Les données AROME aujourd'hui/demain ne sont acceptées qu'avec des périodes
-  datées. Un manque de couverture diurne ne devient jamais une production de
-  zéro. Un vrai zéro fourni par le producteur est accepté. Les courbes datant
-  de plus de 24 h, les valeurs invalides et les chevauchements sont rejetés.
-- La marge solaire est appliquée une fois par jour au total PV, pas trois fois.
-- Priorité d'affichage : préparation d'un jour rouge confirmé, puis charge
-  hebdomadaire dans sa fenêtre, puis déficit prédictif. Les bornes hebdomadaires
-  HH:MM sont respectées ; l'inclusion de la minute de fin suit le code existant.
-- La quantité stockée et le prélèvement réseau estimé sont distincts : la
-  constante prudente `CHARGE_EFFICIENCY` de l'intégration est réutilisée.
-- La faisabilité tient compte des plafonds configurés de la batterie, de la
-  phase et du contrat réseau, après la consommation prévue du foyer. Un seul
-  budget réseau est partagé, sans créditer les exports prévus d'autres phases.
+## Recharge minimale indépendante par phase
 
-## Profil de consommation par phase
+Dans **Omnibattery → Contrôle → Recharge minimale par phase · heures creuses**,
+chaque phase dispose de trois réglages, à enregistrer ensemble :
 
-Un profil de parts de consommation, propre à cette vue et à chaque entrée HA,
-est conservé sur 14 jours. Il ne modifie pas les profils ni les consignes du
-contrôleur. La charge domestique est reconstruite à partir des compteurs de
-phase, de la puissance AC des batteries et du solaire global.
+| Réglage | Défaut | Fonction |
+|---|---:|---|
+| Activer | **OFF** | Autorise cette recharge pour cette phase seulement |
+| Déclencher sous | **8 %** | Déclenche strictement sous le seuil, pas à égalité |
+| Recharger jusqu'à | **15 %** | Maintient la demande jusqu'à cette cible incluse |
 
-**Sans mesure PV par phase, le solaire est supposé réparti par tiers.** Cette
-hypothèse est affichée. Le profil n'est pas alimenté avec des mesures absentes,
-périmées ou incohérentes, et les interruptions ne sont pas remplies de zéros.
+Les seuils doivent vérifier `0 <= seuil < cible <= 100`. Le SOC maximal configuré
+sur la batterie reste une limite : la récupération ne le relève pas. Le PD de la
+phase doit être configuré et activé pour activer la fonction. Les réglages sont
+persistés dans `phase_soc_recovery` de l'entrée de configuration, indépendamment
+pour L1/L2/L3. Seul un administrateur HA peut les modifier.
 
-Chaque quart d'heure utilise des observations de jours précédents lorsqu'elles
-existent ; trois jours suffisamment couverts donnent le libellé « appris ».
-Sinon, le repli est explicitement signalé : profil partiel, parts récentes,
-parts instantanées, puis parts égales. La confiance initiale est donc faible.
-Le changement d'affectation des batteries ou des compteurs invalide ce profil ;
-un simple réglage de Kp ne l'invalide pas.
+Exemple : P3 est à 7 %, P1/P2 à 20 %. Avec la fonction activée sur P3, une demande
+P3 est mémorisée. En HC, P3 recharge jusqu'à 15 %, même après être remontée à 9 %.
+P1/P2 ne reçoivent **aucune recharge forcée liée à cette récupération** ; leur
+régulation normale (et une éventuelle autre charge autorisée) continue.
 
-## Limites importantes
+Hors HC, la demande attend. À **06:00**, le dispatcher demande 0 W pour libérer
+sa consigne forcée avant de reprendre la régulation normale au cycle suivant.
+Si la cible n'est pas atteinte, la demande peut reprendre aux HC suivantes.
+La désactivation ou l'atteinte de la cible retire également la consigne forcée.
+Une absence d'acquittement entraîne des tentatives d'arrêt espacées ; elle n'est
+jamais interprétée comme la preuve d'une puissance physique nulle.
 
-- Première version destinée à une flotte complète de trois batteries affectées
-  à L1/L2/L3. Les mappings incomplets, ambigus et flottes mixtes sont signalés.
-- Le déficit prédictif utilise le mode **Time Slot**. Les calendriers de prix
-  dynamiques et prix temps réel ne sont pas remplacés par un faux plan Tempo.
-- Il s'agit d'une projection de recharge : la consommation nocturne est supposée
-  alimentée par le réseau. Le **SOC max estimé** n'est pas une garantie de SOC
-  à 06:00 si le contrôleur décharge après avoir atteint une cible. Les phases
-  peuvent également avoir un besoin propre que le seul budget global ne couvre
-  pas : l'état `phase_constraint` le rend visible sans accroître ce budget.
-- La puissance chargeable est une **borne supérieure sous les plafonds connus**.
-  Température, BMS, rampe, réévaluation du contrôleur, tarification, blocages
-  temporaires et délai solaire hebdomadaire peuvent encore la réduire. Pas de
-  garantie d'heure précise d'achèvement ni de simulation complète de la boucle PD.
-- La Pause VE est affichée comme suspension ; le mode manuel et les autres
-  propriétaires sont exclus. La projection future suppose les modes observés
-  maintenus et n'invente pas les interventions futures d'un utilisateur.
-- Après 22 h, le prochain créneau vise le jour après demain. Si le fournisseur
-  ne publie pas encore sa courbe, ce créneau reste indisponible, tandis que le
-  créneau en cours peut être calculé normalement.
-- Mise à jour toutes les 60 s, et sur les mises à jour batterie regroupées avec
-  un espacement d'environ 30 s. Les gros attributs ne sont pas enregistrés par
-  Recorder. Le petit profil par phase dispose de son propre Store.
+L'hystérésis est conservée dans un Store HA, par entrée/phase/batterie/seuils.
+Une réaffectation de batterie ou un changement de réglages invalide l'ancienne
+demande. Des données SOC invalides ne déclenchent pas artificiellement de charge.
 
-## Frontend et compatibilité
+La récupération fonctionne indépendamment de l'activation de la charge
+prédictive, mais **uniquement dans les HC Tempo**. Elle emprunte le dispatcher
+existant, pas un second programme de commande.
 
-Le module `frontend/tempo-preview.js` est servi par le chemin statique existant
-et enregistré dans les modules supplémentaires HA. Il ajoute seulement une vue
-au panneau 1.6.0, sans remplacer son fichier principal. Deux points d'extension
-privés du panneau (`_renderControl` et `_patchControl`) sont utilisés ; leur
-contrat et le sélecteur `diagPredictive` devront être revérifiés à chaque backport
-majeur du frontend. Aucun service HA n'est appelé par le module. Plusieurs
-entrées de configuration sont rendues séparément.
+## Priorités et protections
 
-## Validation
+Ordre des demandes automatiques par phase :
+**préparation Tempo rouge → charge complète hebdomadaire → récupération SOC →
+charge prédictive ordinaire**. Les modes manuel, Pause VE, secours, propriétaires
+externes, indisponibilités et blocages de sécurité restent prioritaires.
+Les plafonds batterie/phase/contrat et la rampe existante sont conservés.
+Le budget réseau réserve aussi une augmentation tentée dont l'acquittement est
+incertain, y compris l'arrêt d'une décharge, avant de traiter la phase suivante.
+
+Avec **pilotage Tempo et charge prédictive activés**, la logique existante vise
+**100 % avant chaque jour rouge confirmé** : 22 h la veille à 6 h le jour rouge,
+y compris les jours rouges consécutifs. La récupération à 15 % ne remplace pas
+cet objectif. Cette évolution ne force pas silencieusement l'activation de Tempo.
+Lorsque le solaire manque, la règle 100 % peut rester visible sans inventer un
+chiffre en kWh. Une courbe solaire de l'après-midi suivant n'est pas exigée pour
+projeter la recharge complète d'une plage HC déjà commencée.
+
+**Cette fonction logicielle ne remplace pas les protections du BMS et ne garantit
+pas l'absence de décharge profonde.** En HP, en cas de perte de communication,
+de Pause VE, de mode manuel ou de blocage, elle ne forcera pas une recharge.
+
+## Données et limites de la prévision
+
+Le prévisionnel reste en lecture seule : il ne change ni les consignes actives
+ni les demandes de récupération. Il partage un budget global puis le répartit
+par phase ; un objectif de récupération est un minimum local, pas un deuxième
+volume ajouté à une recharge déjà suffisante.
+
+Le profil de parts de consommation conserve 14 jours d'observations ; les replis
+(parts récentes, instantanées ou égales) sont signalés. Sans mesure photovoltaïque
+par phase, le solaire est supposé réparti par tiers. La durée HC utilise UTC pour
+les calculs : 7 ou 9 heures aux changements d'heure.
+
+Pour AROME, une courbe marquée `complete: false` peut servir **seulement à cet
+aperçu** si les intervalles futurs nécessaires sont réellement présents. Le
+manque de données passées ne suffit plus à la rejeter. Tout trou dans la période
+diurne future requise reste une erreur. Le lecteur de production et les états
+HA originaux ne sont pas modifiés, et aucune production n'est inventée.
+
+La quantité chargeable est une estimation sous les plafonds connus, pas une
+promesse : température, BMS, rampe, nouvelles consommations, mises à jour météo
+et autres blocages peuvent la réduire. La consommation nocturne est supposée
+alimentée par le réseau ; une décharge après l'atteinte de la cible peut réduire
+le SOC à 6 h. Après 22 h, la plage suivante nécessite parfois les prévisions de
+J+2, pas encore publiées. Le créneau actuel reste traité séparément.
+
+Première version : une flotte complète de trois batteries, chacune affectée à
+L1/L2/L3 ; les mappings ambigus sont refusés. Le déficit prédictif est calculé
+pour le mode Time Slot, pas pour une grille dynamique arbitraire.
+
+## Tests et contrat frontend
 
 ```bash
 python -m pip install pytest
-python scripts/test_tempo_preview_isolated.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python scripts/test_phase_recovery_isolated.py
 node --check custom_components/omnibattery/frontend/tempo-preview.js
 ```
 
-Avec Python 3.14 et les dépendances HA :
+Le lanceur isolé exécute les vrais planificateur, compteurs et dispatcher de
+phase avec horloge/imports HA, persistance et matériel simulés. Les tests de
+l'adaptateur utilisent des prévisions synthétiques. Cela n'est **pas** un test
+d'installation HA complète ni une certification matérielle.
 
 ```bash
-python -m pip install -r requirements-test.txt
-python -m pytest -p no:homeassistant tests/test_tempo_preview.py \
-  tests/test_tempo_preview_adapter.py tests/test_tempo_preview_sensor.py
+python -m pip install playwright
+python -m playwright install chromium
+python scripts/test_phase_recovery_frontend.py
 ```
 
-Le workflow **Tempo preview validation** contient un job pur et un job de
-contrats avec les dépendances HA réelles ; les nouveaux tests sont également
-collectés par le workflow général. Les fixtures ne commandent aucun matériel.
-
-Validation locale lors de l'implémentation : **48 tests purs**, **26 contrats
-adaptateur**, **6 contrats de cycle de vie**, tous réussis sous Python 3.13.
-Les deux dernières séries utilisent localement des frontières HA/upstream
-simulées ; elles ne constituent pas une exécution complète de Home Assistant.
-Le rendu a aussi été vérifié dans Chromium sur ordinateur et mobile avec des
-états synthétiques : indépendance des entrées, valeurs nulles distinctes de
-zéro, échappement des noms d'appareils et absence d'appels de services.
-Aucun fonctionnement matériel ni succès de la CI distante n'est présumé.
+Le navigateur utilise un panneau de test dont les points d'extension reproduisent
+le contrat du panneau 1.6.0. Les hooks `_buildBatteryCard`, `_patchBatteries`,
+`_renderControl`, `_patchControl` et `M.hyst` doivent être revérifiés lors des
+backports majeurs. Aucun fichier principal de 580 ko n'est remplacé.

@@ -9,9 +9,11 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 import json
 from time import monotonic
+from types import SimpleNamespace
 
 from ..const import CHARGE_EFFICIENCY, PREDICTIVE_MODE_TIME_SLOT, WEEKDAY_MAP
-from ..control.edf_tempo import read_tempo_snapshot
+from ..control.edf_tempo import is_tempo_offpeak, read_tempo_snapshot
+from ..control.phase_soc_recovery import settings_for
 from ..control.phase_config import channel_data
 from ..control.phase_meter_fallback import select_phase_meter
 from ..control.weekly_charge_window import active_cycle_date
@@ -123,6 +125,12 @@ def _batteries(entry, controller, now):
         raw_target = runtime_targets.get(name, other_targets.get(c))
         if not getattr(controller, "grid_charging_active", False) or getattr(controller, "ev_charging_pause_enabled", False):
             raw_target = None
+        recovery_manager = getattr(getattr(controller, "_phase_runtime", None), "_soc_recovery", None)
+        if (recovery_manager is not None and recovery_manager.pending(phase, name)
+                and is_tempo_offpeak(now) and not block
+                and not getattr(controller, "ev_charging_pause_enabled", False)):
+            recovery_target = min(settings_for(entry, phase).target_soc, float(c.max_soc))
+            raw_target = max(float(raw_target or 0), recovery_target)
         if getattr(controller, "_tempo_charge_active", False) and not getattr(controller, "ev_charging_pause_enabled", False):
             raw_target = 100
         target = finite(raw_target, maximum=100)
@@ -157,6 +165,20 @@ def _fresh_forecast(state, now):
     return state if -300 <= age <= 86400 else None
 
 
+def _preview_arome_periods(state, *, day):
+    """Accept a partial provider day ONLY for the read-only range projection.
+
+    AROME complete=False can mean missing past morning samples. Keep all dated
+    future samples and require exact future daylight coverage in
+    _solar_for_slice; do not turn a future hole into a zero forecast. The live
+    controller's whole-day parser and its safety policy remain unchanged.
+    """
+    if state is not None and state.attributes.get("complete") is False:
+        state = SimpleNamespace(state=state.state,
+                                attributes={**state.attributes, "complete": True})
+    return _arome_power_periods(state, day=day)
+
+
 def _solar_periods(hass, controller, now):
     sources = [get_configured_solar_forecast_sensor(controller, kind)
                for kind in ("remaining", "today")]
@@ -167,8 +189,8 @@ def _solar_periods(hass, controller, now):
         today_id = _arome_companion_entity(source, "today")
         tomorrow_id = _arome_companion_entity(source, "tomorrow")
         if today_id and tomorrow_id:
-            periods = list(_arome_power_periods(_fresh_forecast(hass.states.get(today_id), now), day=day))
-            periods += list(_arome_power_periods(_fresh_forecast(hass.states.get(tomorrow_id), now), day=day + timedelta(days=1)))
+            periods = list(_preview_arome_periods(_fresh_forecast(hass.states.get(today_id), now), day=day))
+            periods += list(_preview_arome_periods(_fresh_forecast(hass.states.get(tomorrow_id), now), day=day + timedelta(days=1)))
         else:
             periods = list(_extract_forecast_periods(_fresh_forecast(hass.states.get(source), now)))
         if not periods:
@@ -305,10 +327,12 @@ def build_snapshot(hass, entry, controller, profile, now):
         preview = {"start": window.start.isoformat(), "end": window.end.isoformat(),
                    "current": key == "current_window", "status": "unavailable", "rows": [],
                    "needed_battery_kwh": None, "planned_battery_kwh": None, "grid_charge_kwh": None}
+        reason = None
         try:
+            reason, color, warnings = _reason(hass, entry, controller, now, window)
+            preview.update({"reason": reason, "tempo_color": color})
             if failure:
                 raise MissingForecast(failure)
-            reason, color, warnings = _reason(hass, entry, controller, now, window)
             if reason == "predictive" and getattr(controller, "predictive_charging_mode", None) != PREDICTIVE_MODE_TIME_SLOT:
                 raise MissingForecast("requires_tempo_time_slot_mode")
             horizon = datetime.combine(window.end.astimezone(PARIS).date(), time(22), PARIS)
@@ -335,7 +359,10 @@ def build_snapshot(hass, entry, controller, profile, now):
                 quality.add(share_source)
                 if not forecast.mature:
                     quality.add("household_profile_fallback")
-                solar = _solar_for_slice(periods, start, end, tracker)
+                # After a mandatory full-charge deadline solar no longer
+                # determines the target; do not demand an irrelevant curve.
+                solar = (0.0 if reason in ("tempo_red", "weekly_full") and start >= utc(window.end)
+                         else _solar_for_slice(periods, start, end, tracker))
                 total = daily_solar.get(day, 0.0)
                 if total > 0:
                     solar *= max(0.0, total - margin) / total
@@ -361,7 +388,12 @@ def build_snapshot(hass, entry, controller, profile, now):
                 items=items, reason=reason, charge_eff=charge_eff, discharge_eff=discharge_eff,
                 grid_limit_kw=grid / 1000, phase_limit_kw=phase / 1000,
                 global_budget=_shared_budget, enabled=enabled,
-                pause=bool(getattr(controller, "ev_charging_pause_enabled", False)), floor_pct=floor)
+                pause=bool(getattr(controller, "ev_charging_pause_enabled", False)), floor_pct=floor,
+                recovery_settings={p: settings_for(entry, p) for p in PHASES},
+                recovery_pending={p: bool(
+                    getattr(getattr(controller, "_phase_runtime", None), "_soc_recovery", None)
+                    and controller._phase_runtime._soc_recovery.pending(p, channel_data(entry, p).get("battery"))
+                ) for p in PHASES})
             warnings += ["balanced_pv_assumption", "configured_power_upper_bound", "preview_not_runtime_setpoint", "night_house_grid_assumption"]
             if key == "next_window" and current is not None:
                 warnings.append("current_hc_projection_conditional")
@@ -376,7 +408,18 @@ def build_snapshot(hass, entry, controller, profile, now):
         except (ValueError, AttributeError, TypeError, KeyError) as exc:
             preview["error"] = str(exc)
             preview["warnings"] = ["forecast_unavailable_not_zero"]
-            preview["rows"] = [{"phase": p, "battery": channel_data(entry, p).get("battery"),
-                                  "status": "unavailable"} for p in PHASES]
+            # A missing solar curve does not cancel the existing red-day
+            # 100% rule. Show the rule, but never invent energy or feasibility.
+            by_phase = {b.phase: b for b in (batteries or ())}
+            preview["rows"] = []
+            for p in PHASES:
+                b = by_phase.get(p)
+                status = (b.block if b and b.block else
+                          "paused_ev" if getattr(controller, "ev_charging_pause_enabled", False)
+                          else "unavailable")
+                preview["rows"].append({"phase": p, "battery": channel_data(entry, p).get("battery"),
+                    "status": status, "reason": reason,
+                    "soc_target": 100.0 if reason == "tempo_red" and b and not b.block else None,
+                    "needed_battery_kwh": None, "planned_battery_kwh": None, "grid_charge_kwh": None})
         result[key] = preview
     return result

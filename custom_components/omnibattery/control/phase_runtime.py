@@ -84,6 +84,7 @@ class PhaseRuntime:
         self._recovery_started = {}
         self.safety_status = {}
         self._last_grid_charge_owner: dict[str, str] = {}
+        self._soc_recovery = None
 
     def _performance(self, phase):
         """Return optional instrumentation without affecting battery control."""
@@ -149,6 +150,16 @@ class PhaseRuntime:
         ctl = self.controller
         if not self.active_batteries or ctl.manual_mode_enabled or ctl.ev_charging_pause_enabled:
             return
+        # Lazy restoration keeps this optional feature inert when disabled.
+        # It does not depend on the dashboard being open or the sensor enabled.
+        from .phase_soc_recovery import settings_for
+        if self._soc_recovery is not None or any(
+            settings_for(ctl.config_entry, c.phase).enabled for c in self.channels
+        ):
+            if self._soc_recovery is None:
+                from ..phase_recovery_config import get_manager
+                self._soc_recovery = get_manager(ctl.hass, ctl.config_entry)
+            await self._soc_recovery.async_load()
         # Reserve headroom across all phase decisions inside one controller cycle.
         self._tempo_reserved_increment_w = 0.0
         for channel in self.channels:
@@ -294,9 +305,16 @@ class PhaseRuntime:
                 )
             except (TypeError, ValueError):
                 predictive_pending = False
+            recovery = (self._soc_recovery.decide(
+                phase, battery, offpeak=predictive_offpeak,
+            ) if self._soc_recovery is not None else None)
+            recovery_pending = recovery is not None and recovery.target_soc is not None
+            # Full red-day preparation remains 100%; the recovery floor must
+            # never replace it with 15%. Each recovery request is phase-local.
             forced_charge_mode = (
                 "tempo" if getattr(ctl, "_tempo_charge_active", False)
                 else "weekly" if weekly_requested
+                else "soc_recovery" if recovery_pending
                 else "predictive" if predictive_pending else None
             )
             if forced_charge_mode is not None:
@@ -353,12 +371,11 @@ class PhaseRuntime:
                     stopped = await ctl._set_battery_power(
                         battery, 0, 0, owner=f"phase:{phase}"
                     )
+                    # Stopping discharge may increase import even if its ACK
+                    # is lost. Reserve that attempt for following phases too.
+                    self._tempo_reserved_increment_w += release_w
                     if stopped:
                         self.manager.acknowledge(phase, 0, now=now)
-                        self._tempo_reserved_increment_w = (
-                            getattr(self, "_tempo_reserved_increment_w", 0.0)
-                            + release_w
-                        )
                         self.safety_status[phase] = (
                             f"{forced_charge_mode}_discharge_stopped_before_charge"
                         )
@@ -368,7 +385,6 @@ class PhaseRuntime:
                         )
                     continue
 
-                soc = float(battery.data.get("battery_soc", 0) or 0)
                 bms_full = bool(
                     weekly_manager is not None
                     and weekly_manager.is_battery_full(battery)
@@ -396,35 +412,28 @@ class PhaseRuntime:
                 ok = await ctl._set_battery_power(
                     battery, request, 0, owner=f"phase:{phase}",
                 )
+                # An uncertain ACK is not evidence that the inverter ignored
+                # the command. Reserve every attempted increase for this cycle.
+                self._tempo_reserved_increment_w += max(0.0, request - max(0.0, last))
                 if ok:
                     self.manager.acknowledge(phase, request, now=now)
-                    self._tempo_reserved_increment_w = (
-                        getattr(self, "_tempo_reserved_increment_w", 0.0)
-                        + max(0.0, request - max(0.0, last))
-                    )
                     self.safety_status[phase] = f"{forced_charge_mode}_charge_command_accepted"
                 else:
                     self.safety_status[phase] = f"{forced_charge_mode}_charge_command_unconfirmed"
                 continue
 
-            # Release an outstanding predictive grid command as soon as its
-            # SOC target is met, the forecast plan is withdrawn, or 06:00
-            # closes the HC window. Normal solar-surplus PD resumes next cycle.
+            # End-of-window/target/disable handover precedes PD deadband and
+            # pacing. Always request zero, including a nonzero write whose ACK
+            # failed while the planner still remembers zero. Retry failures.
             state = self.manager.planner.states[channel.battery_key]
-            if (
-                not predictive_pending
-                and self._last_grid_charge_owner.get(phase) == "predictive"
-            ):
-                if state.last_command_w > 0:
-                    stopped = await ctl._set_battery_power(
-                        battery, 0, 0, owner=f"phase:{phase}", force_write=True
-                    )
-                    if not stopped:
-                        self.safety_status[phase] = "predictive_release_stop_unconfirmed"
-                        continue
-                    self.manager.acknowledge(phase, 0, now=now)
+            previous_owner = self._last_grid_charge_owner.get(phase)
+            if previous_owner in ("predictive", "soc_recovery", "tempo", "weekly"):
+                stopped = await self._force_zero(channel, battery, now=now)
+                if not stopped:
+                    self.safety_status[phase] = f"{previous_owner}_release_stop_unconfirmed"
+                    continue
                 self._last_grid_charge_owner.pop(phase, None)
-                self.safety_status[phase] = "predictive_released"
+                self.safety_status[phase] = f"{previous_owner}_released"
                 continue
 
             # Hard handover at 06:00 on red days: remove any residual
