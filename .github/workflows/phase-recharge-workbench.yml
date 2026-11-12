@@ -1,0 +1,19 @@
+name: Phase recharge workbench
+on:
+  push:
+    branches: [work/tempo-phase-recharge-20261112]
+    paths: [.github/workflows/phase-recharge-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive source for local regression tests
+        run: git archive --format=zip --output=source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase-recharge-source
+          path: source.zip
+          retention-days: 1
