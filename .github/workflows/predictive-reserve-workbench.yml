@@ -2,7 +2,8 @@ name: Predictive reserve workbench
 on:
   push:
     branches: [work/predictive-reserve-20261113]
-    paths: [.github/workflows/predictive-reserve-workbench.yml]
+  pull_request:
+    branches: [main]
 permissions:
   contents: read
 jobs:
