@@ -1,0 +1,19 @@
+name: Predictive reserve workbench
+on:
+  push:
+    branches: [work/predictive-reserve-20261113]
+    paths: [.github/workflows/predictive-reserve-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Archive source for isolated regression tests
+        run: git archive --format=zip --output=source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: predictive-reserve-source
+          path: source.zip
+          retention-days: 1
