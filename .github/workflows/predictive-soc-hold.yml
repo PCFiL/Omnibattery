@@ -1,0 +1,42 @@
+name: Predictive charging and overnight SOC hold
+on:
+  push:
+    branches: [main]
+    paths:
+      - custom_components/omnibattery/control/predictive_soc_hold.py
+      - custom_components/omnibattery/control/phase_runtime.py
+      - custom_components/omnibattery/pricing/engine.py
+      - scripts/test_predictive_soc_hold.py
+      - .github/workflows/predictive-soc-hold.yml
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  isolated-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check integration syntax
+        run: python -m compileall -q custom_components/omnibattery
+      - name: Run isolated SOC hold regressions (not a full HA run)
+        run: python scripts/test_predictive_soc_hold.py
+      - name: Verify predictive import and disjoint solar accounting
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          source = Path('custom_components/omnibattery/pricing/engine.py').read_text()
+          tree = ast.parse(source)
+          assert any(isinstance(n, ast.ImportFrom) and n.module == 'const' and any(a.name == 'PREDICTIVE_MODE_TIME_SLOT' for a in n.names) for n in tree.body)
+          cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'PricingManager')
+          method = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef) and n.name == '_evaluate_remaining_grid_charging')
+          body = ast.get_source_segment(source, method)
+          assert 'min(end_of_day, horizon_end)' in body
+          assert 'balance_solar_kwh = remaining_solar_kwh + tomorrow_solar_kwh' in body
+          assert 'balance_solar_kwh +=' not in body
+          PY

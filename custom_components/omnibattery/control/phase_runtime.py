@@ -85,6 +85,7 @@ class PhaseRuntime:
         self.safety_status = {}
         self._last_grid_charge_owner: dict[str, str] = {}
         self._soc_recovery = None
+        self._predictive_soc_hold = None
 
     def _performance(self, phase):
         """Return optional instrumentation without affecting battery control."""
@@ -102,6 +103,7 @@ class PhaseRuntime:
         inverter. The next safety stop must be an actual write, not reuse the
         startup stop or wait for its 30-second reassertion interval.
         """
+        phase = phase
         self._stop_confirmed.discard(phase)
         self._last_stop_attempt.pop(phase, None)
         self._last_stop_ack.pop(phase, None)
@@ -146,8 +148,70 @@ class PhaseRuntime:
             )
         return ok
 
+    def _hold_safety_override(self, channel, battery, phase_grid_w):
+        """Economic SOC retention must not prevent protective discharge.
+
+        Also consider the import increase caused by STOPPING a discharge, not
+        just the meter reading that already benefits from that discharge.
+        """
+        from math import isfinite
+        ctl = self.controller
+        try:
+            override = getattr(ctl, "_capacity_protection_overrides_curtailment", None)
+            if callable(override) and override():
+                return True
+            if getattr(ctl, "_predictive_demand_state", None) in {
+                "peak_shaving", "emergency_discharge",
+            }:
+                return True
+            prior = self.manager.planner.states[channel.battery_key]
+            release_w = max(0.0, -float(prior.last_command_w))
+            delivered = getattr(ctl, "_coordinator_delivered_power", None)
+            if callable(delivered):
+                measured = delivered(battery)
+                if measured is not None and isfinite(float(measured)):
+                    release_w = max(release_w, -float(measured))
+            phase_limit = float(ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500))
+            global_state = ctl.hass.states.get(ctl.consumption_sensor)
+            global_power = ctl._apply_meter_transform(global_state)
+            report = (getattr(global_state, "last_reported", None)
+                      or getattr(global_state, "last_updated", None))
+            if (global_power is None or not isfinite(float(global_power))
+                    or report is None or not ctl._sensor_is_within_stale_tolerance(report)):
+                return True
+            global_limit = float(ctl._predictive_charge_ceiling())
+            if not all(isfinite(v) and v > 0 for v in (phase_limit, global_limit)):
+                return True
+            margin = max(50.0, channel.deadband_w)
+            reserved = getattr(self, "_tempo_reserved_increment_w", 0.0)
+            return (
+                phase_grid_w + release_w >= phase_limit - margin
+                or float(global_power) + release_w + reserved >= global_limit - margin
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            # An uncertain safety envelope must not impose a new stop on the
+            # protection/regulation path. It never authorizes extra charging.
+            return True
+
+    @property
+    def predictive_soc_hold_status(self):
+        """Read-only per-phase retention diagnostics for the preview sensor."""
+        return self._predictive_soc_hold.snapshot() if self._predictive_soc_hold else {}
+
     async def run(self):
         ctl = self.controller
+        from homeassistant.util import dt as dt_util
+        wall_now = dt_util.now()
+        # Refresh even on a manual/EV early return: manual/disable cancels its
+        # reservation; EV pause suspends it. Neither grants new power writes.
+        if self.active_batteries and (
+            self._predictive_soc_hold is not None
+            or getattr(ctl, "predictive_charging_enabled", False)
+        ):
+            if self._predictive_soc_hold is None:
+                from .predictive_soc_hold import PredictiveSocHold
+                self._predictive_soc_hold = PredictiveSocHold(ctl, self.channels)
+            await self._predictive_soc_hold.async_refresh(wall_now)
         if not self.active_batteries or ctl.manual_mode_enabled or ctl.ev_charging_pause_enabled:
             return
         # Lazy restoration keeps this optional feature inert when disabled.
@@ -248,6 +312,16 @@ class PhaseRuntime:
                 max_charge = 0
             if ctl.get_discharge_blockers(battery):
                 max_discharge = 0
+            holding_reserve = False
+            if self._predictive_soc_hold is not None:
+                allowed = self._predictive_soc_hold.discharge_limit(
+                    phase, battery, max_discharge, now=wall_now,
+                    safety=self._hold_safety_override(channel, battery, selected.reading.power_w),
+                )
+                holding_reserve = (
+                    self._predictive_soc_hold.status.get(phase, {}).get("state") == "holding"
+                )
+                max_discharge = min(max_discharge, allowed)
 
             # Apply safety reductions before either normal PD deadband/pacing
             # or forced-grid-charge pacing can retain an obsolete setpoint.
@@ -270,7 +344,8 @@ class PhaseRuntime:
                 # charge reduction as spare headroom for the following phases.
                 self._tempo_reserved_increment_w += max(0.0, limited - old_command)
                 self.safety_status[phase] = (
-                    "power_limit_command_accepted" if ok
+                    "predictive_reserve_stop_command_accepted" if ok and holding_reserve
+                    else "power_limit_command_accepted" if ok
                     else "power_limit_command_unconfirmed"
                 )
                 continue
@@ -456,7 +531,9 @@ class PhaseRuntime:
                 now=now,
             )
             if proposed is None:
-                self.safety_status[phase] = "normal_no_change"
+                self.safety_status[phase] = (
+                    "predictive_reserve_held_until_06" if holding_reserve else "normal_no_change"
+                )
                 continue
             if proposed != 0:
                 self._invalidate_stop_ack(phase)
