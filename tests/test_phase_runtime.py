@@ -7,11 +7,30 @@ from homeassistant.util import dt as dt_util
 import pytest
 
 from custom_components.omnibattery.control.phase_runtime import PhaseRuntime
+from custom_components.omnibattery.control import predictive_soc_hold
+
+
+class MemoryStore:
+    """Replace persistence I/O, while exercising the real SOC hold manager."""
+
+    def __init__(self, _hass, _version, _key):
+        self.value = None
+
+    async def async_load(self):
+        return self.value
+
+    async def async_save(self, value):
+        self.value = value
+
+
+@pytest.fixture(autouse=True)
+def memory_soc_hold_store(monkeypatch):
+    monkeypatch.setattr(predictive_soc_hold, "Store", MemoryStore)
 
 
 class FakeController:
     def __init__(self, sensor_value="988"):
-        self.config_entry = SimpleNamespace(data={"phase_pd_channels": [
+        self.config_entry = SimpleNamespace(entry_id="phase_runtime_test", data={"phase_pd_channels": [
             {"phase": "L3", "battery": "mix_ac_1", "grid_sensor": "sensor.l3", "enabled": True}
         ]})
         self.coordinators = [SimpleNamespace(

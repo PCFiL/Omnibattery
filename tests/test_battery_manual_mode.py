@@ -252,9 +252,11 @@ def test_weekly_full_charge_does_not_classify_manual_battery_as_full():
         battery_manual_mode_enabled=True,
         data={"battery_soc": 100},
     )
-    manager = SimpleNamespace(_bms_cutoff_counts={coordinator.name: 3})
+    manager = WeeklyFullChargeManager.__new__(WeeklyFullChargeManager)
+    manager._controller = SimpleNamespace()
+    manager._bms_cutoff_counts = {coordinator.name: 3}
 
-    assert WeeklyFullChargeManager.is_battery_full(manager, coordinator) is False
+    assert manager.is_battery_full(coordinator) is False
 
 
 def test_existing_coordinator_defaults_individual_manual_mode_off():

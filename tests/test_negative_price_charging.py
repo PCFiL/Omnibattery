@@ -313,7 +313,7 @@ def test_energy_and_targets_cover_multiple_different_batteries():
     assert targets[second] == 100
 
 
-def test_opportunity_target_stays_authoritative_during_weekly_full_charge():
+def test_weekly_full_charge_supersedes_old_opportunity_target():
     battery = _Battery("b1", 70, 10, max_soc=90)
     ctrl = SimpleNamespace(
         grid_charging_active=True,
@@ -326,11 +326,11 @@ def test_opportunity_target_stays_authoritative_during_weekly_full_charge():
         ctrl, battery, weekly_100_unlocked=True
     )
 
-    assert (ceiling, source) == (90.0, "predictive_target")
+    assert (ceiling, source) == (100, "weekly_full_charge")
 
 
-def test_normal_predictive_target_stays_authoritative_during_weekly_full_charge():
-    """Weekly full charge permits solar top-up, never extra grid charging."""
+def test_weekly_full_charge_supersedes_old_partial_predictive_target():
+    """The explicitly scheduled full charge owns the target during its window."""
     battery = _Battery("b1", 20, 10, max_soc=95)
     ctrl = SimpleNamespace(
         grid_charging_active=True,
@@ -343,7 +343,7 @@ def test_normal_predictive_target_stays_authoritative_during_weekly_full_charge(
         ctrl, battery, weekly_100_unlocked=True
     )
 
-    assert (ceiling, source) == (30.0, "predictive_target")
+    assert (ceiling, source) == (100, "weekly_full_charge")
 
 
 def test_unavailable_battery_does_not_create_opportunistic_energy():

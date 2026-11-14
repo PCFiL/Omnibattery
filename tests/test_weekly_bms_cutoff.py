@@ -12,9 +12,13 @@ isolate the cutoff counter from day/feature gating.
 """
 from __future__ import annotations
 
+from itertools import count
 from types import SimpleNamespace
 
+import pytest
+
 from custom_components.omnibattery.const import NORMAL_BALANCE_TAPER_CELL_VOLTAGE
+from custom_components.omnibattery.control import weekly_full_charge as weekly_module
 from custom_components.omnibattery.control.weekly_full_charge import (
     WeeklyFullChargeManager,
     _BMS_CUTOFF_REQUIRED_CYCLES,
@@ -23,6 +27,18 @@ from custom_components.omnibattery.control.max_soc_charge import MaxSocChargeMan
 
 _IN_ZONE = NORMAL_BALANCE_TAPER_CELL_VOLTAGE + 0.05  # cell above taper entry
 _STANDBY = 1
+
+
+@pytest.fixture(autouse=True)
+def _elapsed_control_cycles(monkeypatch):
+    """Model real samples three seconds apart, after command engagement.
+
+    Production now requires both five refusal samples and ten elapsed seconds.
+    Running those samples in one instant would exercise the confirmation delay,
+    rather than the completed BMS refusal these lifecycle tests describe.
+    """
+    ticks = count(100.0, 3.0)
+    monkeypatch.setattr(weekly_module, "monotonic", lambda: next(ticks))
 
 
 class _Coord:
@@ -50,6 +66,7 @@ def _mgr(coord, *, top_charge_manager=None):
     m = WeeklyFullChargeManager.__new__(WeeklyFullChargeManager)
     m._controller = ctrl
     m._bms_cutoff_counts = {}
+    m._bms_charge_commanded_at = {coord.name: 0.0}
     m._already_complete_logged = False
     m.is_active = lambda: True  # weekly active; bypass day/feature gating
     return m
@@ -196,6 +213,7 @@ def test_venus_ad_first_cutoff_does_not_complete_until_retry_is_refused():
     weekly = WeeklyFullChargeManager.__new__(WeeklyFullChargeManager)
     weekly._controller = ctrl
     weekly._bms_cutoff_counts = {"bat": _BMS_CUTOFF_REQUIRED_CYCLES}
+    weekly._bms_charge_commanded_at = {coord.name: 0.0}
     weekly._already_complete_logged = False
     weekly.is_active = lambda: True
     ctrl._weekly_charge_mgr = weekly
@@ -246,6 +264,7 @@ def test_venus_ad_rearms_three_sequential_pack_handovers_then_finishes():
     weekly = WeeklyFullChargeManager.__new__(WeeklyFullChargeManager)
     weekly._controller = ctrl
     weekly._bms_cutoff_counts = {}
+    weekly._bms_charge_commanded_at = {coord.name: 0.0}
     weekly._already_complete_logged = False
     weekly.is_active = lambda: True
     ctrl._weekly_charge_mgr = weekly

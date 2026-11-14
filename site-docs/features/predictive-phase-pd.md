@@ -7,6 +7,10 @@ SOC targets** to each phase owner.
 
 - **Tempo red night**: mandatory 100% charge still takes priority.
 - **Weekly full charge**: mandatory 100% charge takes second priority.
+- **Low-SOC recovery**: if explicitly enabled for a phase, its configured
+  recovery target is served before ordinary predictive charging. Reaching
+  that target releases the recovery request; a higher predictive target can
+  then continue in the same authorized night.
 - **Ordinary predictive charge**: charges only if the existing predictive
   mode has authorised a grid-charging slot and calculated a pending SOC target.
 - **Normal phase PD**: controls surplus absorption/house supply otherwise.
@@ -61,3 +65,61 @@ recommended before relying on overnight automation.
 A mixed fleet containing both phase-owned and ordinary fleet-owned batteries
 is intentionally excluded from this handoff until cross-owner import-budget
 reservation is implemented.
+
+## Continuous overnight planning and mode changes
+
+Time Slot execution and its planner use the same Europe/Paris clock. The
+planner retains an overnight window across midnight, anchors it to its start
+weekday, intersects it with 22:00–06:00, and does not count overlapping windows
+as extra charging capacity. Disabled windows grant no charging permission.
+An inactive or deferred decision is reconsidered after midnight and at most
+15 minutes later while its window remains open, even if SOC stays at the
+discharge floor. An ongoing charge keeps its authorized target between those
+boundaries. The first evaluation waits for battery telemetry if none is
+available yet.
+
+A positive daily solar balance does not mean the battery can cover the hours
+before sunrise. The chronological plan accounts for consumption and solar in
+time order: tomorrow's afternoon production cannot erase a morning energy
+shortfall. A zero daily grid-energy balance may therefore still produce a
+positive night-charge target. The target is limited by the battery's available
+capacity and the power and time available in the authorized window.
+
+Tempo and weekly full-charge ownership supersede an older partial predictive
+target. When either owner changes, the controller discards that stale target
+and re-evaluates the next mode from the actual SOC. The weekly deadline is its
+configured finish time, not a separately inferred sunrise.
+
+The user-control boundaries remain above all automatic modes:
+
+| Control request | Behavior |
+| --- | --- |
+| EV charging pause | Reject every nonzero command, including manual commands. |
+| Global or individual manual control | Apply the user's manual setpoint; exclude the owned batteries from automatic planning and dispatch. |
+| Manual time slot | The configured slot owns its batteries; automatic phase commands cannot overwrite it. |
+| Tempo, weekly, recovery, predictive | Follow the automatic priority above, subject to meter freshness, battery availability, BMS, thermal and power limits. |
+
+Global manual setpoints have an explicit manual writer identity, so phase
+ownership does not accidentally reject the user's own command. This identity
+is accepted only while global manual mode is active. The final writer also
+rejects an automatic command that was queued before the manual takeover.
+
+Manual operation slots use Home Assistant's configured local clock and their
+starting weekday across midnight. Their ownership is checked before weekly
+or Tempo hardware cutoff management, including the first cycle of the slot.
+Any pending cutoff restoration waits until the manual/calibration owner
+releases the battery.
+
+### Runtime regression coverage
+
+`tests/test_nightly_charge_orchestration.py` uses an in-process Home Assistant,
+the actual pricing manager, controller and phase dispatcher, with simulated
+battery I/O. It covers a solar-positive next day with empty batteries at night,
+the midnight handover, the 06:00 stop, manual ownership and EV pause. Additional
+tests cover configured weekly deadlines, restoration after disabling/reloading,
+weekday anchoring, and low-SOC recovery handoffs. GitHub Actions runs the
+`nightly-charging` suite independently of the historical unit suite.
+
+These tests establish software behavior; they do not establish which code or
+settings a particular Home Assistant installation has loaded, or verify
+physical battery delivery.

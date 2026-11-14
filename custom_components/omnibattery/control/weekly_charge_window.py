@@ -21,7 +21,10 @@ def parse_clock(value: str) -> time:
         parsed = time.fromisoformat(value)
     except ValueError as exc:
         raise ValueError("Clock must be HH:MM") from exc
-    if len(value) != 5 or value[2] != ":" or parsed.second or parsed.microsecond:
+    # Python 3.14 accepts ISO 24:00 and normalizes it to 00:00. A setting
+    # names a clock on the selected day, so that rollover must not silently
+    # turn an invalid finish into midnight at the beginning of the window.
+    if value != f"{parsed.hour:02d}:{parsed.minute:02d}" or parsed.second or parsed.microsecond:
         raise ValueError("Clock must be HH:MM")
     return parsed
 

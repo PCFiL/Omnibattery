@@ -45,7 +45,7 @@ async def test_software_manual_charge_still_asserts_setpoint():
     await ChargeDischargeController._apply_software_manual_setpoints(controller)
 
     controller._set_battery_power.assert_awaited_once_with(
-        coord, 1200, 0, bypass_blockers=True
+        coord, 1200, 0, bypass_blockers=True, owner="global_manual"
     )
 
 
@@ -64,7 +64,7 @@ async def test_software_manual_discharge_still_asserts_setpoint():
     await ChargeDischargeController._apply_software_manual_setpoints(controller)
 
     controller._set_battery_power.assert_awaited_once_with(
-        coord, 0, 800, bypass_blockers=True
+        coord, 0, 800, bypass_blockers=True, owner="global_manual"
     )
 
 

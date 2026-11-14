@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, ha-flows, historical-regressions, phase-transitions]
+        suite: [unit, ha-flows, historical-regressions, phase-transitions, nightly-charging]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +78,29 @@ jobs:
                 tests/test_command_ownership.py \
                 tests/test_battery_manual_mode.py \
                 tests/test_control_cycle_scheduling.py
+              ;;
+            nightly-charging)
+              # Exercise the real HA imports, planner, controller and phase
+              # writer independently of unrelated historical unit failures.
+              # Battery I/O is simulated; this does not contact live devices.
+              python -m pytest -v --junitxml="$report" \
+                tests/test_nightly_charge_orchestration.py \
+                tests/test_time_slot_overnight_regressions.py \
+                tests/test_manual_slot_schedule.py \
+                tests/test_time_slot_power_limits.py \
+                tests/test_charge_sequence_runtime.py \
+                tests/test_weekly_schedule_handoffs.py \
+                tests/test_weekly_full_charge_lifecycle.py \
+                tests/test_weekly_charge_window.py \
+                tests/test_weekly_predictive_charge.py \
+                tests/test_weekly_bms_cutoff.py \
+                tests/test_predictive_tempo_offpeak.py \
+                tests/test_predictive_target_soc.py \
+                tests/test_software_manual_idle.py \
+                tests/test_battery_manual_mode.py \
+                tests/test_slot_charge_soc_cap.py \
+                tests/test_negative_price_charging.py \
+                tests/test_edf_tempo.py
               ;;
             *)
               echo "Unknown test suite: $TEST_SUITE" >&2

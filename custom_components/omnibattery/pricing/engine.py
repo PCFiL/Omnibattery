@@ -86,6 +86,7 @@ from .energyzero import (
 )
 from ..control.max_soc_charge import MaxSocChargeManager
 from ..control.pack_soc import soc_vs_ceiling
+from ..control.edf_tempo import PARIS
 from ..drivers.base import has_solar_production_source
 from ..tracking.consumption_profile import adjust_remaining_fallback_energy
 from ..energy import effective_round_trip_efficiency
@@ -137,6 +138,9 @@ _LOGGER = logging.getLogger(__name__)
 # predictive time slot.  The controller's existing charge-delay grace can
 # override it at runtime; the local default keeps lightweight callers safe.
 TIME_SLOT_FORECAST_GRACE_S = 300.0
+# A no-charge/deferred decision is revisited without waiting for a large SOC
+# movement: a battery held at its floor may otherwise stay unchanged all night.
+TIME_SLOT_INACTIVE_REEVALUATION_S = 900.0
 
 # A plan is intentionally not rebuilt on every control sample: that would make
 # the selected high-value blocks chatter while SOC telemetry is settling.  It
@@ -264,7 +268,17 @@ class PricingManager:
         self._last_sensor_parse_status: str | None = None
 
     def _now(self) -> datetime:
-        """Return local wall-clock time, isolated for deterministic slot tests."""
+        """Return the wall clock used by the mode's execution calendar."""
+        if (
+            getattr(self._controller, "predictive_charging_mode", None)
+            == PREDICTIVE_MODE_TIME_SLOT
+        ):
+            # The controller authorizes Time Slot charging in Europe/Paris.
+            # HA containers can run in UTC: using the host clock here would
+            # authorize 22:00 in one component and plan 21:00 in the other.
+            # Pricing calendars use naive local values; strip awareness only
+            # after conversion to the same timezone as the execution gate.
+            return datetime.now(PARIS).replace(tzinfo=None)
         return datetime.now()
 
     def energy_horizon_end(self, now: datetime) -> datetime:
@@ -3600,12 +3614,9 @@ class PricingManager:
             return None
 
     def _time_slot_price_slots(self, now: datetime) -> list[PriceSlot]:
-        """Materialize today's configured predictive windows as price slots.
-
-        Time Slot has no price ranking, so every window receives the same
-        synthetic price. Splitting overnight windows at midnight keeps the
-        energy horizon strict while retaining the currently active portion.
-        """
+        """Materialize authorized windows through the current day's midnight."""
+        if now.tzinfo is not None:
+            now = now.astimezone(PARIS)
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         horizon_end = midnight + timedelta(days=1)
         return self._time_slot_price_slots_for_horizon(now, horizon_end)
@@ -3615,18 +3626,19 @@ class PricingManager:
         now: datetime,
         horizon_end: datetime,
     ) -> list[PriceSlot]:
-        """Materialize configured Time Slot windows within a preview horizon.
+        """Materialize executable windows within the requested energy horizon.
 
-        This is for diagnostic/dashboard projections only.  Runtime control
-        must continue to call :meth:`_time_slot_price_slots`, whose horizon is
-        strictly the current local day.  Each calendar date is evaluated with
-        the same ``days`` semantics as the existing helper, so an overnight
-        window is represented by its two local-day portions.
+        A weekday belongs to the beginning of its configured window. Keep an
+        overnight window intact and intersect it with the same 22:00–06:00
+        gate used by the controller, so the planner cannot defer work into a
+        daytime window that execution would refuse.
         """
+        if now.tzinfo is not None:
+            now = now.astimezone(PARIS)
         if horizon_end.tzinfo is None and now.tzinfo is not None:
             horizon_end = horizon_end.replace(tzinfo=now.tzinfo)
         elif now.tzinfo is None and horizon_end.tzinfo is not None:
-            horizon_end = horizon_end.replace(tzinfo=None)
+            horizon_end = horizon_end.astimezone(PARIS).replace(tzinfo=None)
         elif now.tzinfo is not None:
             horizon_end = horizon_end.astimezone(now.tzinfo)
         if horizon_end <= now:
@@ -3634,7 +3646,8 @@ class PricingManager:
 
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         result: list[PriceSlot] = []
-        current_day = midnight
+        # Yesterday may own the still-active post-midnight portion.
+        current_day = midnight - timedelta(days=1)
         while current_day < horizon_end:
             day_name = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][
                 current_day.weekday()
@@ -3646,7 +3659,7 @@ class PricingManager:
                 if configured.get("enabled", True) is False:
                     continue
                 days = configured.get("days", []) or []
-                if days and day_name not in days:
+                if day_name not in days:
                     continue
                 try:
                     # HA's TimeSelector stores "HH:MM:SS"; fromisoformat takes
@@ -3662,20 +3675,31 @@ class PricingManager:
                 end = datetime.combine(
                     current_day.date(), end_time, tzinfo=now.tzinfo
                 )
-                pieces = (
-                    [(start, end)]
-                    if start_time <= end_time
-                    else [(current_day, end), (start, next_midnight)]
-                )
-                result.extend(
-                    PriceSlot(piece_start, min(piece_end, horizon_end), 0.0)
-                    for piece_start, piece_end in pieces
-                    if piece_end > now
-                    and piece_start < horizon_end
-                    and piece_end > piece_start
-                )
+                if start_time > end_time:
+                    end += timedelta(days=1)
+                # Intersect with both possible HC nights. A same-day window
+                # such as 01:00–23:00 has two disjoint authorized portions;
+                # Monday 22:00–Tuesday 06:00 remains one continuous interval.
+                for night_start_day in (
+                    current_day - timedelta(days=1), current_day,
+                ):
+                    hc_start = night_start_day.replace(hour=22)
+                    hc_end = (night_start_day + timedelta(days=1)).replace(hour=6)
+                    piece_start = max(start, hc_start)
+                    piece_end = min(end, hc_end, horizon_end)
+                    if piece_end > max(now, piece_start):
+                        result.append(PriceSlot(piece_start, piece_end, 0.0))
             current_day = next_midnight
-        return sorted(set(result), key=lambda slot: (slot.start, slot.end))
+        # Overlapping settings describe one permission interval, not twice
+        # the available charging power. Preserve adjacent distinct windows.
+        merged: list[PriceSlot] = []
+        for slot in sorted(set(result), key=lambda item: (item.start, item.end)):
+            if merged and slot.start < merged[-1].end:
+                previous = merged[-1]
+                merged[-1] = PriceSlot(previous.start, max(previous.end, slot.end), 0.0)
+            else:
+                merged.append(slot)
+        return merged
 
     @staticmethod
     def _plan_within(
@@ -3700,14 +3724,28 @@ class PricingManager:
         """Apply the active configured-window quota to a Time Slot decision."""
         controller = self._controller
         controller._active_time_slot_quota_kwh = None
-        candidates = self._time_slot_price_slots(now)
+        horizon_end = decision_data.get("energy_horizon_end")
+        if not isinstance(horizon_end, datetime):
+            horizon_end = self.energy_horizon_end(now)
+        if horizon_end.tzinfo is None and now.tzinfo is not None:
+            horizon_end = horizon_end.replace(tzinfo=now.tzinfo)
+        elif now.tzinfo is None and horizon_end.tzinfo is not None:
+            horizon_end = horizon_end.astimezone(PARIS).replace(tzinfo=None)
+        if horizon_end <= now:
+            return decision_data
+        candidates = self._time_slot_price_slots_for_horizon(now, horizon_end)
         if not candidates:
             return decision_data
+        aggregate_should_charge = bool(decision_data.get("should_charge", False))
         plan = self._build_chronological_plan(
             now=now,
             slots=candidates,
             decision_data=decision_data,
             price_ceiling=None,
+            # A positive daily solar balance does not cover a deficit before
+            # sunrise. Derive storage needs from their deadlines, using the
+            # same horizon as the balance and the entire authorized HC night.
+            planning_end=horizon_end,
         )
         if plan is None:
             return decision_data
@@ -3718,13 +3756,16 @@ class PricingManager:
             for allocation in plan.allocations
             if allocation.slot.start <= now < allocation.slot.end
         )
-        aggregate_should_charge = bool(decision_data.get("should_charge", False))
         decision_data["aggregate_should_charge"] = aggregate_should_charge
         decision_data["time_slot_chronological_active"] = True
         decision_data["active_slot_energy_target_kwh"] = round(quota, 3)
         decision_data["should_charge"] = quota > 1e-6
         if quota > 1e-6:
             controller._active_time_slot_quota_kwh = quota
+            if not aggregate_should_charge:
+                decision_data["reason"] = (
+                    "Stored energy is required before a forecast consumption deadline"
+                )
         elif aggregate_should_charge:
             decision_data["chronological_deferred"] = True
             decision_data["reason"] = (
@@ -5379,11 +5420,20 @@ class PricingManager:
                 None,
             ) is not None
         ):
-            current = now or datetime.now()
+            current = now or self._now()
             midnight = current.replace(
                 hour=0, minute=0, second=0, microsecond=0
             ) + timedelta(days=1)
             horizon_end = midnight
+            if (
+                getattr(self._controller, "predictive_charging_mode", None)
+                == PREDICTIVE_MODE_TIME_SLOT
+                and current.hour >= 18
+            ):
+                # Even without tomorrow's dated forecast, midnight cannot
+                # end tonight's planning horizon while the HC slot continues
+                # until 06:00. Conservatively cover the next dawn.
+                horizon_end = max(midnight, self.energy_horizon_end(current))
             # Tempo blue/white: at the evening HC window, extend the balance
             # through tomorrow's daylight only when the configured solar
             # provider publishes explicitly dated future periods. The calendar
@@ -6818,17 +6868,42 @@ class PricingManager:
                 c for c in self._controller.coordinators
                 if c.data and not getattr(c, "battery_manual_mode_enabled", False)
             ]
+            if not automatic:
+                # Coordinator data can arrive after the control loop starts.
+                # Do not cache a zero-SOC/no-demand decision for the full night.
+                return
             current_avg_soc = (
                 sum(c.data.get("battery_soc", 0) for c in automatic)
                 / max(1, len(automatic))
             )
-            is_initial_eval = self._controller.last_evaluation_soc is None
+            active_window = next(
+                (
+                    slot
+                    for slot in self._time_slot_price_slots_for_horizon(
+                        now, now.replace(hour=0, minute=0, second=0, microsecond=0)
+                        + timedelta(days=2)
+                    )
+                    if slot.start <= now < slot.end
+                ),
+                None,
+            )
+            window_key = (
+                (active_window.start, active_window.end)
+                if active_window is not None else None
+            )
+            previous_window = getattr(self._controller, "_time_slot_active_window", None)
+            window_changed = window_key is not None and window_key != previous_window
+            if window_key is not None:
+                self._controller._time_slot_active_window = window_key
+            is_initial_eval = (
+                self._controller.last_evaluation_soc is None or window_changed
+            )
 
             # Record entry for diagnostics and for the bounded retry grace below.
             # A valid forecast (or no configured forecast) is evaluated in this
             # same cycle; entering a second configured window must not impose a
             # fixed five-minute delay.
-            if self._controller._slot_entry_time is None:
+            if self._controller._slot_entry_time is None or window_changed:
                 self._controller._slot_entry_time = now
                 _LOGGER.info(
                     "Time slot entered (SOC: %.1f%%) — evaluating predictive charging",
@@ -6883,12 +6958,33 @@ class PricingManager:
                 != getattr(self._controller, "_last_eval_peak_shaving_held", False)
             )
 
+            last_evaluation_at = getattr(
+                self._controller, "_time_slot_last_evaluation_at", None
+            )
+            if not isinstance(last_evaluation_at, datetime):
+                last_evaluation_at = self._controller._slot_entry_time
+            inactive_refresh = False
+            if (
+                not is_initial_eval
+                and not self._controller.grid_charging_active
+                and isinstance(last_evaluation_at, datetime)
+            ):
+                try:
+                    inactive_refresh = (
+                        last_evaluation_at.date() != now.date()
+                        or (now - last_evaluation_at).total_seconds()
+                        >= TIME_SLOT_INACTIVE_REEVALUATION_S
+                    )
+                except (TypeError, ValueError):
+                    inactive_refresh = True
+
             should_reevaluate = (
                 is_initial_eval or
                 floor_crossed or
                 floor_recovered or
                 forecast_moved or
                 peak_shaving_moved or
+                inactive_refresh or
                 abs(current_avg_soc - self._controller.last_evaluation_soc) >= SOC_REEVALUATION_THRESHOLD
             )
 
@@ -6909,6 +7005,11 @@ class PricingManager:
                     _LOGGER.info(
                         "RE-EVALUATING predictive grid charging: peak shaving %s (SOC: %.1f%%)",
                         "engaged" if peak_shaving_held else "released",
+                        current_avg_soc,
+                    )
+                elif inactive_refresh:
+                    _LOGGER.info(
+                        "RE-EVALUATING inactive predictive charging window (SOC: %.1f%%)",
                         current_avg_soc,
                     )
                 elif floor_recovered:
@@ -7013,6 +7114,7 @@ class PricingManager:
                 was_active = self._controller.grid_charging_active
                 self._controller.grid_charging_active = decision_data["should_charge"]
                 self._controller.last_evaluation_soc = current_avg_soc
+                self._controller._time_slot_last_evaluation_at = now
                 self._controller._last_eval_peak_shaving_held = peak_shaving_held
                 self._controller._last_decision_data = decision_data
                 # Arms the forecast trigger on the slot's first evaluation and
@@ -7077,6 +7179,8 @@ class PricingManager:
 
             self._controller._slot_entry_time = None
             self._controller._active_time_slot_quota_kwh = None
+            self._controller._time_slot_active_window = None
+            self._controller._time_slot_last_evaluation_at = None
 
     async def _send_predictive_charging_notification(
         self,

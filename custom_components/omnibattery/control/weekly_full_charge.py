@@ -24,7 +24,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 from .weekly_charge_window import (
     CONF_WEEKLY_START, CONF_WEEKLY_END, DEFAULT_WEEKLY_START,
-    DEFAULT_WEEKLY_END, in_window, active_cycle_date,
+    DEFAULT_WEEKLY_END, active_cycle_date, parse_clock,
 )
 
 from .pack_soc import control_vmax, soc_vs_ceiling
@@ -118,6 +118,28 @@ class WeeklyFullChargeManager:
         """Expose the underlying Store (for legacy attribute compatibility)."""
         return self._store
 
+    def _other_owner(self, coordinator: Any) -> bool:
+        """Whether a user, calibration, backup or manual slot owns the battery.
+
+        Registers are reconciled before manual time slots are dispatched. Read
+        the requested slot now, not only the previous cycle's ownership set,
+        so its first active cycle cannot receive a weekly 100% cutoff write.
+        """
+        ctrl = self._controller
+        manual = getattr(ctrl, "_is_battery_manual_owned", None)
+        if callable(manual):
+            if manual(coordinator):
+                return True
+        elif getattr(coordinator, "battery_manual_mode_enabled", False):
+            return True
+        requested = getattr(ctrl, "_is_manual_slot_requested", None)
+        if not callable(requested):
+            requested = getattr(ctrl, "_is_manual_slot_owned", None)
+        if callable(requested) and requested(coordinator):
+            return True
+        backup = getattr(ctrl, "_is_backup_function_active", None)
+        return bool(callable(backup) and backup(coordinator))
+
     def tick_bms_cutoff(self) -> None:
         """Update per-battery BMS-cutoff counters for the current cycle.
 
@@ -150,8 +172,8 @@ class WeeklyFullChargeManager:
                 charge_commanded_at.setdefault(c.name, now)
             else:
                 charge_commanded_at.pop(c.name, None)
-            if getattr(c, "battery_manual_mode_enabled", False):
-                # Individual manual mode owns the battery. Freeze its cutoff
+            if self._other_owner(c):
+                # Another controller owns the battery. Freeze its cutoff
                 # evidence so weekly charge cannot classify or reconfigure it.
                 continue
             if not c.data:
@@ -273,7 +295,7 @@ class WeeklyFullChargeManager:
         Used by both handle_registers() (weekly completion) and
         _get_available_batteries() (normal max_soc=100% case).
         """
-        if getattr(coordinator, "battery_manual_mode_enabled", False):
+        if self._other_owner(coordinator):
             return False
         if not coordinator.data:
             return False
@@ -324,39 +346,42 @@ class WeeklyFullChargeManager:
         return datetime.combine(day, datetime.min.time()) + timedelta(hours=float(hours))
 
     def window_end(self, now: datetime) -> datetime | None:
-        """When the current charge window ends: the sunrise after the target day.
+        """Exclusive end of the configured active window, in ``now``'s timezone.
 
-        The remaining gap is bought after the target day's sun has set, so the
-        cheap hours of the night after it belong to the same run. Without a
-        known sunrise the window ends at midnight, as it always did. Returned in
-        ``now``'s timezone (naive for a naive ``now``); None outside the window.
+        The predictive planner must use the same deadline as ``is_active``.
+        A sunrise deadline could otherwise reserve charging after a configured
+        05:30 finish. The end minute remains included, as in ``in_window``.
         """
-        target_weekday = WEEKDAY_MAP[self._controller.weekly_full_charge_day]
-        local = now.replace(tzinfo=None) if now.tzinfo else now
-        if local.weekday() == target_weekday:
-            day_after = local.date() + timedelta(days=1)
-        elif self.in_overnight_extension(local):
-            day_after = local.date()
-        else:
+        ctrl = self._controller
+        start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
+        end = ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
+        cycle = active_cycle_date(
+            now, start=start, end=end,
+            weekday=WEEKDAY_MAP[ctrl.weekly_full_charge_day],
+        )
+        if cycle is None:
             return None
-        end = self._sunrise_on(day_after) or datetime.combine(day_after, datetime.min.time())
-        return end.replace(tzinfo=now.tzinfo) if now.tzinfo else end
+        first, last = parse_clock(start), parse_clock(end)
+        end_day = cycle + timedelta(days=1) if first > last else cycle
+        return datetime.combine(end_day, last, tzinfo=now.tzinfo) + timedelta(minutes=1)
 
     def in_overnight_extension(self, now: datetime) -> bool:
-        """True in the night after the target day, before its sunrise."""
-        target_weekday = WEEKDAY_MAP[self._controller.weekly_full_charge_day]
-        local = now.replace(tzinfo=None) if now.tzinfo else now
-        if local.weekday() != (target_weekday + 1) % 7:
-            return False
-        end = self._sunrise_on(local.date())
-        return end is not None and local < end
+        """True after midnight while the preceding day's configured run continues."""
+        ctrl = self._controller
+        cycle = active_cycle_date(
+            now,
+            start=ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START),
+            end=ctrl.config_entry.data.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END),
+            weekday=WEEKDAY_MAP[ctrl.weekly_full_charge_day],
+        )
+        return cycle is not None and cycle < now.date()
 
     def is_active(self) -> bool:
         """Check if weekly full charge is currently active.
 
         Returns True if:
         - Feature is enabled
-        - It is the selected day, or the night after it before sunrise
+        - It is within the configured window, including its overnight portion
         - NOT all batteries have reached 100% yet
 
         Also handles the end of that window to reset the flags.
@@ -433,8 +458,6 @@ class WeeklyFullChargeManager:
         completes, the system remembers not to restart the charging process.
         """
         ctrl = self._controller
-        if not ctrl.weekly_full_charge_enabled:
-            return
 
         try:
             data = await self._store.async_load()
@@ -448,8 +471,8 @@ class WeeklyFullChargeManager:
             cycle = active_cycle_date(
                 now, start=start, end=end,
                 weekday=WEEKDAY_MAP[ctrl.weekly_full_charge_day],
-            )
-            saved_cycle = data.get("cycle_date", data.get("date"))
+            ) if ctrl.weekly_full_charge_enabled else None
+            saved_cycle = data.get("cycle_date") or data.get("date")
             # Sunday 22:30 and Monday 04:00 share the same Sunday cycle date.
             if cycle is not None and saved_cycle == cycle.isoformat():
                 ctrl._weekly_active_cycle_date = cycle
@@ -481,18 +504,18 @@ class WeeklyFullChargeManager:
     async def save_state(self) -> None:
         """Save weekly charge state to persistent storage."""
         ctrl = self._controller
-        if not ctrl.weekly_full_charge_enabled:
-            return
 
         try:
-            now = datetime.now()
+            # Cleanup must survive a reload even after the user disables the
+            # feature. An unsuccessful hardware restore remains retryable.
+            now = dt_util.now()
             data = {
                 "complete": ctrl.weekly_full_charge_complete,
                 "registers_written": ctrl.weekly_full_charge_registers_written,
                 "state": ctrl._weekly_charge_status.get("state", "Idle"),
                 "restore_pending": bool(getattr(ctrl, "_weekly_charge_needs_restore", False)),
                 "saved_max_soc": dict(getattr(ctrl, "_weekly_charge_saved_max_soc", {})),
-                "date": date.today().isoformat(),
+                "date": now.date().isoformat(),
                 "cycle_date": (
                     ctrl._weekly_active_cycle_date.isoformat()
                     if getattr(ctrl, "_weekly_active_cycle_date", None) else None
@@ -562,25 +585,37 @@ class WeeklyFullChargeManager:
             return 100
 
     async def _restore_hardware_cutoffs(self, reason: str) -> bool:
-        """Restore saved hardware SOC cutoffs and report whether all writes worked."""
+        """Restore available batteries, retaining owned/failed writes for retry."""
         ctrl = self._controller
-        all_ok = True
         saved = getattr(ctrl, "_weekly_charge_saved_max_soc", {})
+        if not saved:
+            # Legacy state may only say that registers were written. Capture
+            # its configured fallbacks once so successful writes can be
+            # removed individually while another battery remains user-owned.
+            saved.update({
+                c.name: self._get_configured_max_soc(c)
+                for c in ctrl.coordinators
+                if c.capabilities.hardware_soc_cutoff
+            })
+        current_names = {c.name for c in ctrl.coordinators}
+        for name in set(saved) - current_names:
+            saved.pop(name, None)
         for coordinator in ctrl.coordinators:
-            if getattr(coordinator, "battery_manual_mode_enabled", False):
+            if coordinator.name not in saved:
                 continue
-            if ctrl._is_backup_function_active(coordinator):
+            if self._other_owner(coordinator):
+                # A skipped restore is still pending, not a successful write.
+                # Preserve the original cutoff until that owner releases it.
                 continue
             if not coordinator.capabilities.hardware_soc_cutoff:
                 _LOGGER.debug(
                     "%s: No hardware cutoff to restore (software-enforced battery)",
                     coordinator.name,
                 )
+                saved.pop(coordinator.name, None)
                 continue
 
-            original_max_soc = saved.get(
-                coordinator.name, self._get_configured_max_soc(coordinator)
-            )
+            original_max_soc = saved[coordinator.name]
             try:
                 ok = await coordinator.set_charge_cutoff(original_max_soc)
             except Exception as e:
@@ -593,6 +628,8 @@ class WeeklyFullChargeManager:
                     e,
                 )
             if ok:
+                saved.pop(coordinator.name, None)
+                getattr(self, "_cutoff_applied_names", set()).discard(coordinator.name)
                 _LOGGER.info(
                     "%s: Restored hardware cutoff to %d%% after %s",
                     coordinator.name,
@@ -600,14 +637,13 @@ class WeeklyFullChargeManager:
                     reason,
                 )
             else:
-                all_ok = False
                 _LOGGER.error(
                     "%s: Charging cutoff restore to %d%% was rejected after %s; will retry",
                     coordinator.name,
                     original_max_soc,
                     reason,
                 )
-        return all_ok
+        return not saved
 
     async def handle_registers(self) -> None:
         """Manage weekly full charge register writes and completion detection.
@@ -653,7 +689,7 @@ class WeeklyFullChargeManager:
         automatic_batteries = [
             coordinator
             for coordinator in ctrl.coordinators
-            if not getattr(coordinator, "battery_manual_mode_enabled", False)
+            if not self._other_owner(coordinator)
         ]
         if not automatic_batteries:
             # Do not mark a weekly run as active when every battery is owned by
@@ -678,8 +714,7 @@ class WeeklyFullChargeManager:
         pending_hardware = {
             coordinator.name
             for coordinator in ctrl.coordinators
-            if not getattr(coordinator, "battery_manual_mode_enabled", False)
-            and not ctrl._is_backup_function_active(coordinator)
+            if not self._other_owner(coordinator)
             and coordinator.capabilities.hardware_soc_cutoff
         }
         need_write = (
@@ -694,10 +729,8 @@ class WeeklyFullChargeManager:
             else:
                 _LOGGER.info("Weekly Full Charge: Activating for compatible batteries")
             for coordinator in ctrl.coordinators:
-                if getattr(coordinator, "battery_manual_mode_enabled", False):
-                    continue
-                if ctrl._is_backup_function_active(coordinator):
-                    _LOGGER.debug("%s: Skipping weekly full charge - backup function is active", coordinator.name)
+                if self._other_owner(coordinator):
+                    applied_names.discard(coordinator.name)
                     continue
 
                 if not coordinator.capabilities.hardware_soc_cutoff:
@@ -759,7 +792,7 @@ class WeeklyFullChargeManager:
             c
             for c in ctrl.coordinators
             if c.data
-            and not getattr(c, "battery_manual_mode_enabled", False)
+            and not self._other_owner(c)
         ]
         all_batteries_full = bool(batteries_with_data) and all(
             self.is_battery_full(c)
@@ -774,7 +807,7 @@ class WeeklyFullChargeManager:
             }
             for c in ctrl.coordinators
             if c.data
-            and not getattr(c, "battery_manual_mode_enabled", False)
+            and not self._other_owner(c)
         }
 
         if all_batteries_full and not ctrl.weekly_full_charge_complete:
@@ -789,7 +822,7 @@ class WeeklyFullChargeManager:
         ctrl._weekly_charge_status["completion_reason"] = reason
         completion_batteries: dict = {}
         for coordinator in ctrl.coordinators:
-            if getattr(coordinator, "battery_manual_mode_enabled", False):
+            if self._other_owner(coordinator):
                 continue
             data = coordinator.data or {}
             soc = data.get("battery_soc")
@@ -817,6 +850,8 @@ class WeeklyFullChargeManager:
         )
         if measurement_state is not None:
             for coordinator in ctrl.coordinators:
+                if self._other_owner(coordinator):
+                    continue
                 data = coordinator.data or {}
                 try:
                     vmax = float(data.get("max_cell_voltage"))
@@ -859,7 +894,7 @@ class WeeklyFullChargeManager:
         # the 60-second diagnostic measurement (measurement is best-effort).
         measured = getattr(ctrl, "_normal_balance_last_delta_v", {})
         for coordinator in ctrl.coordinators:
-            if getattr(coordinator, "battery_manual_mode_enabled", False):
+            if self._other_owner(coordinator):
                 continue
             if (
                 measurement_state is not None
@@ -895,7 +930,7 @@ class WeeklyFullChargeManager:
 
         # Re-enable hysteresis for batteries that have it configured.
         for coordinator in ctrl.coordinators:
-            if getattr(coordinator, "battery_manual_mode_enabled", False):
+            if self._other_owner(coordinator):
                 continue
             if coordinator.enable_charge_hysteresis:
                 coordinator._hysteresis_active = True

@@ -1304,6 +1304,7 @@ class ChargeDischargeController:
         self._tempo_red_peak_active = False
         self._tempo_plan = None
         self._tempo_last_active = False
+        self._full_charge_owner: str | None = None
         self._tempo_original_cutoffs: dict[str, int] = {}
         self._tempo_cutoff_applied: set[str] = set()
 
@@ -3093,6 +3094,16 @@ class ChargeDischargeController:
     def _is_manual_slot_owned(self, coordinator) -> bool:
         return coordinator in self._manual_slot_owned
 
+    def _is_manual_slot_requested(self, coordinator) -> bool:
+        """Read current slot ownership before any weekly/Tempo cutoff writes.
+
+        Hardware cutoff management runs before the slot's power command, so
+        the previous cycle's ``_manual_slot_owned`` set is too late to protect
+        the first cycle of a newly active manual slot.
+        """
+        slot = self._get_active_slot(coordinator, "any")
+        return self._slot_manual_direction_for(slot, coordinator) is not None
+
     def _apply_slot_power_ceiling(self, coordinator, is_charging: bool, current_limit: int) -> int:
         """Cap the per-battery power limit with the active slot's power override (PD mode only)."""
         slot = self._get_active_slot(coordinator, "charge" if is_charging else "discharge")
@@ -3889,6 +3900,22 @@ class ChargeDischargeController:
         # Midnight crossing: matches if outside the [end, start] gap.
         return now_time >= start or now_time <= end
 
+    @staticmethod
+    def _slot_matches_local_datetime(slot: dict, now: datetime) -> bool:
+        """Match an operation window by its local starting weekday."""
+        from datetime import time as dt_time
+
+        current_time = now.time().replace(tzinfo=None)
+        if not ChargeDischargeController._slot_time_matches(slot, current_time):
+            return False
+        start = dt_time.fromisoformat(slot["start_time"])
+        end = dt_time.fromisoformat(slot["end_time"])
+        weekday = now.weekday()
+        if start > end and current_time <= end:
+            weekday = (weekday - 1) % 7
+        day_name = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[weekday]
+        return day_name in slot.get("days", [])
+
     def _is_time_slot_allowed(self, coordinator, is_charging: bool) -> bool:
         """Per-battery, per-direction whitelist check for time slots.
 
@@ -3899,8 +3926,6 @@ class ChargeDischargeController:
           - Otherwise: allowed only if the current time matches a slot whose
             `allow_<direction>=True`, scope applies, and day matches.
         """
-        from datetime import datetime
-
         all_slots = self.config_entry.data.get("no_discharge_time_slots", [])
         slots = [s for s in all_slots if s.get("enabled", True)]
         if not slots:
@@ -3911,16 +3936,12 @@ class ChargeDischargeController:
         if not any(s.get(field, False) for s in relevant):
             return True
 
-        now = datetime.now()
-        current_time = now.time()
-        current_day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.weekday()]
+        now = dt_util.now()
 
         for slot in relevant:
             if not slot.get(field, False):
                 continue
-            if current_day not in slot.get("days", []):
-                continue
-            if self._slot_time_matches(slot, current_time):
+            if ChargeDischargeController._slot_matches_local_datetime(slot, now):
                 return True
         return False
 
@@ -4029,6 +4050,8 @@ class ChargeDischargeController:
                 continue
             if self._is_backup_function_active(coordinator):
                 continue
+            if self._is_manual_slot_requested(coordinator):
+                continue
             if getattr(coordinator, "rs485_user_disabled", False):
                 continue
             if not coordinator.is_available or coordinator.data is None:
@@ -4095,6 +4118,8 @@ class ChargeDischargeController:
                 self.grid_charging_active = False
                 self._grid_charging_initialized = False
                 self._predictive_charge_target_soc = None
+                self._phase_predictive_targets = {}
+                self.invalidate_predictive_plan("tempo_charge_ended")
                 # Return control to the normal planner in this same cycle.
                 _LOGGER.info("Tempo: charge window ended, releasing predictive control")
             return False
@@ -4102,19 +4127,6 @@ class ChargeDischargeController:
         if self.is_charge_blocked():
             _LOGGER.debug("Tempo: charge forbidden by %s", self.get_charge_blockers())
             return False
-
-        eligible = self._get_available_batteries(is_charging=True)
-        if not eligible:
-            # Battery completion, manual ownership, disconnected batteries or
-            # protection blockers all mean no new grid-charge command.
-            if self._tempo_last_active:
-                for c in self.coordinators:
-                    if not self._is_battery_manual_owned(c):
-                        await self._set_battery_power(c, 0, 0)
-            self._tempo_last_active = False
-            self.grid_charging_active = False
-            self._grid_charging_initialized = False
-            return True
 
         if not self._tempo_last_active:
             _LOGGER.info("Tempo: starting safeguarded grid charge to 100%%")
@@ -4128,6 +4140,33 @@ class ChargeDischargeController:
         self.grid_charging_active = True
         await self._handle_predictive_grid_charging()
         return True
+
+    def _sync_full_charge_handoff(self) -> None:
+        """Discard a lower-priority plan when a full-charge owner changes.
+
+        Weekly and Tempo windows can start/end inside one predictive window.
+        A stable SOC must not keep the previous owner's target or a previous
+        "no charge" decision latched until the next 30-point SOC change.
+        The normal planner re-evaluates in the same cycle from actual SOC;
+        PhaseRuntime retains exclusive authority over phase power writes.
+        """
+        owner = (
+            "tempo" if getattr(self, "_tempo_charge_active", False)
+            else "weekly" if self._weekly_full_charge_unlocked() else None
+        )
+        previous = getattr(self, "_full_charge_owner", None)
+        if owner == previous:
+            return
+        self._full_charge_owner = owner
+        self.grid_charging_active = False
+        self._grid_charging_initialized = False
+        self._predictive_charge_target_soc = None
+        self._phase_predictive_targets = {}
+        self._active_time_slot_quota_kwh = None
+        self._reset_predictive_demand_runtime()
+        self.invalidate_predictive_plan(
+            f"full_charge_handoff:{previous or 'predictive'}->{owner or 'predictive'}"
+        )
 
     def _weekly_full_charge_unlocked(self) -> bool:
         """Return True when charging to 100% should bypass configured max SOC."""
@@ -4233,9 +4272,11 @@ class ChargeDischargeController:
         ``ignore_predictive_target`` returns the ceiling that applies to solar
         surplus: the predictive target only limits grid energy (issue #470).
         """
-        # A predictive grid-charge target must stop at its explicit target even
-        # when a weekly-full-charge window happens to overlap. On the weekly day
-        # that target is itself sized to 100%, so the two no longer disagree.
+        # A full-charge owner supersedes an earlier partial predictive target.
+        # The two windows may overlap without the forecast having been rebuilt
+        # yet; retaining its old 35% target must not truncate a 100% request.
+        if weekly_100_unlocked:
+            return 100, "weekly_full_charge"
         ceiling = ChargeDischargeController._charge_ceiling_soc(self, coordinator)
         # The slot ceiling has to fold into `ceiling` here rather than sit in a
         # branch below: a predictive grid charge returns on its own target and
@@ -4254,9 +4295,6 @@ class ChargeDischargeController:
             per_battery_target = self._predictive_charge_target_soc.get(coordinator)
             if per_battery_target is not None:
                 return min(ceiling, per_battery_target), "predictive_target"
-
-        if weekly_100_unlocked:
-            return 100, "weekly_full_charge"
 
         if slot_cap is not None:
             return slot_cap, "slot_soc_override"
@@ -4799,15 +4837,11 @@ class ChargeDischargeController:
             direction: "charge", "discharge", or "any". When "charge"/"discharge",
                 only slots with `allow_<direction>=True` are considered.
         """
-        from datetime import datetime
-
         slots = self.config_entry.data.get("no_discharge_time_slots", [])
         if not slots:
             return None
 
-        now = datetime.now()
-        current_time = now.time()
-        current_day = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][now.weekday()]
+        now = dt_util.now()
 
         for slot in slots:
             if not slot.get("enabled", True):
@@ -4818,9 +4852,7 @@ class ChargeDischargeController:
                 continue
             if direction == "discharge" and not slot.get("allow_discharge", False):
                 continue
-            if current_day not in slot.get("days", []):
-                continue
-            if self._slot_time_matches(slot, current_time):
+            if ChargeDischargeController._slot_matches_local_datetime(slot, now):
                 return slot
         return None
 
@@ -6269,6 +6301,8 @@ class ChargeDischargeController:
         today = days[now.weekday()]
         yesterday = days[(now.weekday() - 1) % 7]
         for slot in self.charging_time_slots:
+            if not isinstance(slot, dict) or slot.get("enabled", True) is False:
+                continue
             try:
                 start_time = dt_time.fromisoformat(slot["start_time"])
                 end_time = dt_time.fromisoformat(slot["end_time"])
@@ -7578,20 +7612,16 @@ class ChargeDischargeController:
                 await self._reassert_register_manual_intent(coordinator)
                 continue
             mode = coordinator.manual_force_mode
-            owner = "battery_manual" if individual_mode else "automatic"
+            owner = "battery_manual" if individual_mode else "global_manual"
             if mode == "Charge":
-                kwargs = {"bypass_blockers": True}
-                if individual_mode:
-                    kwargs["owner"] = owner
                 await self._set_battery_power(
-                    coordinator, coordinator.manual_set_charge_power, 0, **kwargs
+                    coordinator, coordinator.manual_set_charge_power, 0,
+                    bypass_blockers=True, owner=owner,
                 )
             elif mode == "Discharge":
-                kwargs = {"bypass_blockers": True}
-                if individual_mode:
-                    kwargs["owner"] = owner
                 await self._set_battery_power(
-                    coordinator, 0, coordinator.manual_set_discharge_power, **kwargs
+                    coordinator, 0, coordinator.manual_set_discharge_power,
+                    bypass_blockers=True, owner=owner,
                 )
             # Idle: leave device alone (no 0 W reassert / no mode force).
 
@@ -7658,6 +7688,18 @@ class ChargeDischargeController:
         """
         if self.ev_charging_pause_enabled and (charge_power > 0 or discharge_power > 0):
             _LOGGER.warning("[%s] EV charging pause blocked nonzero %s command", coordinator.name, owner)
+            return False
+        if owner == "global_manual" and (
+            not self.manual_mode_enabled
+            or ChargeDischargeController._is_battery_manual_owned(coordinator)
+        ):
+            return False
+        if (
+            getattr(self, "manual_mode_enabled", False)
+            and (owner == "automatic" or owner.startswith("phase:"))
+        ):
+            # Re-check after acquiring the per-battery write lock: a manual
+            # takeover may have happened while an automatic write was queued.
             return False
         if (owner == "automatic" or owner.startswith("phase:")) and ChargeDischargeController._is_battery_manual_owned(
             coordinator
@@ -10310,6 +10352,8 @@ class ChargeDischargeController:
 
         # === CHARGE DELAY: Daily reset and solar detection ===
         self._charge_delay_mgr.handle_daily_reset_and_eval()
+
+        self._sync_full_charge_handoff()
 
         # Refresh all operation blockers before mode dispatch and PD early returns.
         # This makes charge/discharge permission a shared registry instead of a

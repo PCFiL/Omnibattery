@@ -337,7 +337,7 @@ def test_simulation_applies_allocation_at_interval_boundary_once():
     assert result.final_projected_energy_kwh == pytest.approx(-1.0)
 
 
-def test_time_slot_windows_are_materialized_and_split_at_midnight():
+def test_time_slot_day_view_respects_start_weekday_and_offpeak_gate():
     now = BASE + timedelta(minutes=30)
     controller = SimpleNamespace(
         charging_time_slots=[
@@ -356,11 +356,9 @@ def test_time_slot_windows_are_materialized_and_split_at_midnight():
 
     slots = PricingManager(SimpleNamespace(), controller)._time_slot_price_slots(now)
 
-    assert [(slot.start.hour, slot.end.hour) for slot in slots] == [
-        (0, 2),
-        (10, 11),
-        (22, 0),
-    ]
+    # Tuesday's overnight setting starts Tuesday evening. Its 00:00 portion
+    # belongs to Monday, and the daytime setting is outside mandatory HC.
+    assert [(slot.start.hour, slot.end.hour) for slot in slots] == [(22, 0)]
     assert slots[-1].end.date() == BASE.date() + timedelta(days=1)
 
 
@@ -398,7 +396,7 @@ def test_no_discharge_window_parses_the_stored_hh_mm_ss_format():
     assert manager._future_slot_matches_operation_block(allowed, window) is False
 
 
-def test_time_slot_dashboard_preview_extends_known_windows_but_control_does_not():
+def test_time_slot_horizon_preserves_whole_authorized_overnight_window():
     now = BASE + timedelta(minutes=30)
     controller = SimpleNamespace(
         charging_time_slots=[
@@ -423,14 +421,10 @@ def test_time_slot_dashboard_preview_extends_known_windows_but_control_does_not(
     )
 
     assert [(slot.start, slot.end) for slot in control_slots] == [
-        (BASE, BASE + timedelta(hours=2)),
         (BASE + timedelta(hours=23), BASE + timedelta(days=1)),
     ]
     assert [(slot.start, slot.end) for slot in preview_slots] == [
-        (BASE, BASE + timedelta(hours=2)),
-        (BASE + timedelta(hours=23), BASE + timedelta(days=1)),
-        (BASE + timedelta(days=1), BASE + timedelta(days=1, hours=2)),
-        (BASE + timedelta(days=1, hours=9), BASE + timedelta(days=1, hours=10)),
+        (BASE + timedelta(hours=23), BASE + timedelta(days=1, hours=2)),
     ]
 
 

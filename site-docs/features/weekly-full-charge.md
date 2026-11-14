@@ -20,7 +20,8 @@ A weekly full charge gives a lithium iron phosphate (LFP) battery regular time a
 1. Open the Omnibattery sidebar dashboard and select **Control**.
 2. In **Weekly Full Charge**, turn on **Weekly Full Charge**.
 3. Choose **Weekly Full Charge Day**.
-4. If you use **Charge Delay**, turn on **Delay Weekly Full Charge** to wait for solar; leave it off to start the weekly cycle without that delay.
+4. Configure the start and finish times in the integration settings. An overnight window belongs to the day on which it starts: Sunday 22:30–05:30 continues into Monday morning. The configured finish minute is included.
+5. If you use **Charge Delay**, turn on **Delay Weekly Full Charge** to wait for solar; leave it off to start the weekly cycle without that delay.
 
 ![Configure the weekly full charge day and solar delay](../assets/screenshots/configuration/advanced-weekly-full-charge-config.png){ width="650" style="display: block; margin: 0 auto;"}
 
@@ -28,7 +29,11 @@ A weekly full charge gives a lithium iron phosphate (LFP) battery regular time a
 
 **Weekly Full Charge** reports `idle`, `charging`, or `complete`. On the selected day, Omnibattery temporarily raises the charge target to 100% for batteries under automatic control. It marks the cycle complete only after every participating battery is considered full, then restores each configured limit.
 
-With [predictive charging](../configuration/predictive-charging/index.md), the remaining energy needed for the weekly target enters the plan. Omnibattery can buy that energy during the configured charging period when forecast solar will not cover it. Without predictive charging, the cycle relies on available solar and may not complete on a cloudy day.
+For batteries controlled by Phase PD, an active, unlocked weekly window explicitly requests grid charging to 100%, after any mandatory Tempo request and ahead of ordinary predictive charging. Its configured hours remain independent of the ordinary predictive 22:00–06:00 restriction. Solar delay, manual ownership, meter freshness and battery protections still apply.
+
+For the ordinary fleet controller, [predictive charging](../configuration/predictive-charging/index.md) includes the remaining weekly energy in its plan and can buy it during the authorized charging period. Without predictive charging, this fleet path relies on available solar.
+
+The planner and the weekly controller share the configured finish time. An interrupted run restores the saved SOC cutoff even if the weekly feature is subsequently disabled or Home Assistant reloads. Pending restoration is retained until the hardware acknowledges it. A transition back to ordinary predictive charging triggers a fresh decision from the actual battery SOC.
 
 The sensor's `batteries` attribute shows the live SOC and completion evidence for each battery. On compatible batteries, **Cell Delta**, **Balance Status**, and **Last Balance Read** update after the top-of-charge measurement. See [Is my battery healthy?](cell-balance-monitor.md) to interpret the result.
 

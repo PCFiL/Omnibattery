@@ -1,7 +1,7 @@
 """Regression tests for weekly full-charge lifecycle persistence and cleanup."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +14,7 @@ from custom_components.omnibattery.control.weekly_full_charge import (
 
 def _controller(**overrides):
     values = dict(
+        config_entry=SimpleNamespace(data={}),
         weekly_full_charge_enabled=True,
         weekly_full_charge_day="mon",
         weekly_full_charge_complete=False,
@@ -23,6 +24,7 @@ def _controller(**overrides):
         _weekly_charge_needs_restore=False,
         _weekly_charge_saved_max_soc={"Zendure": 95},
         _weekly_charge_status={"state": "Charging to 100%"},
+        _weekly_active_cycle_date=date(2026, 8, 17),
         _charge_delay_unlocked=False,
         _solar_t_start=None,
     )
@@ -41,14 +43,13 @@ def _manager(controller):
 def test_exiting_weekly_day_marks_unfinished_run_for_restore():
     controller = _controller()
     manager = _manager(controller)
-    manager.save_state = MagicMock()
+    manager.save_state = AsyncMock()
 
     # Tuesday immediately after a Monday weekly run.
-    with (
-        patch("custom_components.omnibattery.control.weekly_full_charge.datetime") as clock,
-        patch("custom_components.omnibattery.control.weekly_full_charge.asyncio.create_task"),
+    with patch(
+        "custom_components.omnibattery.control.weekly_full_charge.dt_util.now",
+        return_value=datetime(2026, 8, 18, tzinfo=timezone.utc),
     ):
-        clock.now.return_value = datetime(2026, 8, 18)
         assert manager.is_active() is False
 
     assert controller._weekly_charge_needs_restore is True
@@ -76,7 +77,7 @@ async def test_load_state_restores_saved_soc_and_pending_restore():
     store = SimpleNamespace(
         async_load=AsyncMock(
             return_value={
-                "date": date.today().isoformat(),
+                "date": "2026-08-17",
                 "complete": False,
                 "registers_written": True,
                 "state": "Charging to 100%",
@@ -90,7 +91,11 @@ async def test_load_state_restores_saved_soc_and_pending_restore():
     manager = _manager(controller)
     manager._store = store
 
-    await manager.load_state()
+    with patch(
+        "custom_components.omnibattery.control.weekly_full_charge.dt_util.now",
+        return_value=datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+    ):
+        await manager.load_state()
 
     assert controller._weekly_charge_saved_max_soc == {"Zendure": 95}
     assert controller._weekly_charge_needs_restore is True
@@ -103,7 +108,7 @@ async def test_load_state_queues_restore_for_unfinished_previous_day():
     store = SimpleNamespace(
         async_load=AsyncMock(
             return_value={
-                "date": (date.today() - timedelta(days=1)).isoformat(),
+                "date": "2026-08-16",
                 "complete": False,
                 "registers_written": True,
                 "saved_max_soc": {"Zendure": 95},
@@ -113,7 +118,11 @@ async def test_load_state_queues_restore_for_unfinished_previous_day():
     manager = _manager(controller)
     manager._store = store
 
-    await manager.load_state()
+    with patch(
+        "custom_components.omnibattery.control.weekly_full_charge.dt_util.now",
+        return_value=datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+    ):
+        await manager.load_state()
 
     assert controller._weekly_charge_saved_max_soc == {"Zendure": 95}
     assert controller._weekly_charge_needs_restore is True

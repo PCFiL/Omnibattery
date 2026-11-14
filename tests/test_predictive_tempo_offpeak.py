@@ -46,3 +46,19 @@ def test_single_day_slot_never_leaks_into_next_day(monkeypatch):
     windows = [slot("22:00", "23:59")]
     assert active(monkeypatch, 9, 23, 0, windows) is windows[0]
     assert active(monkeypatch, 10, 0, 30, windows) is None
+
+
+def test_disabled_window_is_never_authorized(monkeypatch):
+    disabled = {**slot(), "enabled": False}
+    assert active(monkeypatch, 9, 23, 0, [disabled]) is None
+    assert active(monkeypatch, 10, 5, 0, [disabled]) is None
+
+
+def test_malformed_window_does_not_hide_the_next_valid_window(monkeypatch):
+    enabled = slot()
+    assert active(monkeypatch, 9, 23, 0, [None, enabled]) is enabled
+
+
+def test_empty_days_never_authorize_a_charge(monkeypatch):
+    disabled = {**slot(), "days": []}
+    assert active(monkeypatch, 9, 23, 0, [disabled]) is None
