@@ -18,7 +18,7 @@ from ..forecast.phase_profile import PhaseShareProfile
 from ..forecast.tempo_adapter import build_snapshot, live_phase_loads, topology
 
 _LOGGER = logging.getLogger(__name__)
-MODULE_URL = "/omnibattery_static/tempo-preview.js?v=2"
+MODULE_URL = "/omnibattery_static/tempo-preview.js?v=3"
 FRONTEND_USERS = "_tempo_preview_frontend_entries"
 
 

@@ -1,6 +1,6 @@
 """Persistent per-phase recovery configuration and resumable low-SOC requests.
 
-The admin-only WebSocket command edits configuration, not battery setpoints.
+Authenticated users may read configuration; only admins can edit it.
 All hardware decisions stay inside PhaseRuntime and its guarded writer.
 """
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .control.phase_soc_recovery import (
 
 _LOGGER = logging.getLogger(__name__)
 WS_TYPE = "omnibattery/phase_soc_recovery/configure"
+WS_GET_TYPE = "omnibattery/phase_soc_recovery/get"
 MANAGER_KEY = "phase_soc_recovery_manager"
 
 
@@ -132,6 +133,23 @@ def register_recovery_api(hass):
     if data.get(marker):
         return
 
+    @websocket_api.websocket_command({"type": WS_GET_TYPE})
+    @callback
+    def get_config(hass, connection, msg):
+        """Read active entries directly, independently of diagnostic sensors."""
+        integration = hass.data.get(DOMAIN, {})
+        entries = []
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            runtime = integration.get(entry.entry_id)
+            if not isinstance(runtime, dict) or runtime.get("controller") is None:
+                continue
+            entries.append({
+                "entry_id": entry.entry_id,
+                "title": entry.title,
+                "recovery_config": config_snapshot(hass, entry),
+            })
+        connection.send_result(msg["id"], {"entries": entries})
+
     @websocket_api.websocket_command({
         "type": WS_TYPE,
         vol.Required("entry_id"): str,
@@ -161,5 +179,6 @@ def register_recovery_api(hass):
             refresh()
         connection.send_result(msg["id"], {"phase": phase, **settings.to_dict()})
 
+    websocket_api.async_register_command(hass, get_config)
     websocket_api.async_register_command(hass, configure)
     data[marker] = True

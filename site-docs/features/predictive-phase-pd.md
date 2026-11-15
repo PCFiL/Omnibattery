@@ -15,6 +15,27 @@ SOC targets** to each phase owner.
   mode has authorised a grid-charging slot and calculated a pending SOC target.
 - **Normal phase PD**: controls surplus absorption/house supply otherwise.
 
+## Deep-discharge protection settings
+
+In **Control**, the **Deep-discharge protection · off-peak recharge** card
+(French: **Anti-décharge profonde · recharge en heures creuses**) appears
+immediately below the layout toolbar, before the feature grid. It exposes
+the enable switch, trigger SOC and target SOC for each phase. Older versions
+placed this card at the bottom under **Recharge minimale par phase · heures
+creuses**.
+
+The panel loads these settings directly from the integration. The optional
+**Tempo charge preview** sensor can be disabled or unavailable without hiding
+the controls or preventing an administrator from saving them. A failed read
+displays an explicit error with a retry button; viewing the card does not
+enable recovery or send a battery command. Existing settings are retained.
+
+Recovery is disabled by default, with a trigger **below 8%** and a target of
+**15%** when enabled. Each phase must have its PD channel configured and
+enabled. Recovery charges only in **22:00–06:00 Europe/Paris**, and remains
+separate from the predictive **minimum SOC floor** setting. Reaching the
+recovery target releases the phase for the next authorized charging mode.
+
 ## EDF Tempo off-peak window (hard constraint)
 
 All automatic **predictive grid charging** is restricted to local

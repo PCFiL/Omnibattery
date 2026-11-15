@@ -28,6 +28,10 @@
  * animation and ring transitions never restart.
  */
 
+// Control settings must load with the panel, even when the optional Tempo
+// forecast sensor (and therefore its extra frontend module) is disabled.
+import "./tempo-preview.js?v=3";
+
 const FALLBACK_DOMAIN = "omnibattery";
 const FALLBACK_TITLE = "Omnibattery";
 const DAILY_OPERATION_BASE_INTERVALS = 96;

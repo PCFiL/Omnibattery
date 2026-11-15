@@ -90,6 +90,7 @@ jobs:
                 tests/test_predictive_options_reenable.py \
                 tests/test_predictive_live_reenable.py \
                 tests/test_predictive_charge_diagnostics.py \
+                tests/test_phase_recovery_config_api.py \
                 tests/test_time_slot_overnight_regressions.py \
                 tests/test_manual_slot_schedule.py \
                 tests/test_time_slot_power_limits.py \
@@ -120,3 +121,21 @@ jobs:
           path: test-results/
           if-no-files-found: warn
           retention-days: 14
+
+  recovery-panel:
+    name: Recovery Control panel (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install DOM test dependency
+        run: npm install --prefix "$RUNNER_TEMP/omnibattery-ui-tests" --no-save --no-package-lock happy-dom@21.0.4
+      - name: Exercise the real panel without a Tempo preview entity
+        run: |
+          OMNIBATTERY_HAPPY_DOM="$RUNNER_TEMP/omnibattery-ui-tests/node_modules/happy-dom/lib/index.js" \
+            node scripts/test_phase_recovery_panel.mjs

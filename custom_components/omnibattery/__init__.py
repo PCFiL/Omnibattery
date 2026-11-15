@@ -463,6 +463,12 @@ async def _async_register_frontend_panel(hass: HomeAssistant, entry: ConfigEntry
         from homeassistant.components import frontend, panel_custom
         from homeassistant.components.http import StaticPathConfig
 
+        from .phase_recovery_config import register_recovery_api
+
+        # Panel settings must also work when the optional Tempo preview sensor
+        # is disabled. Its legacy registration remains safe and idempotent.
+        register_recovery_api(hass)
+
         frontend_dir = Path(__file__).parent / "frontend"
         domain_data = hass.data.setdefault(DOMAIN, {})
 

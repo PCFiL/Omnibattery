@@ -38,10 +38,16 @@ with sync_playwright() as p:
     }""")
     page.evaluate("async url => {window.extension=await import(url);await Promise.resolve();}",url)
     page.evaluate("""() => {
-      const panel=window.panel=new Panel();panel._batCards={};window.requests=[];
+      const panel=window.panel=new Panel();panel._batCards={};window.requests=[];window.readRequests=[];
       const rows=[1,2,3].map(i=>({phase:'L'+i,battery:'B'+i,soc_start:10,soc_target:i===3?15:50,planned_battery_kwh:i===1?0:i===2?null:.4,needed_battery_kwh:.4,grid_charge_kwh:.45,status:i===2?'unavailable':'planned',reason:i===3?'soc_recovery':'predictive'}));
       const config=Object.fromEntries([1,2,3].map(i=>['L'+i,{battery:'B'+i,enabled:false,start_soc:8,target_soc:15,phase_enabled:true,status:'idle'}]));
-      panel._hass={states:{'sensor.preview':{entity_id:'sensor.preview',state:'planned',attributes:{preview_kind:'tempo_hc_v1',config_entry_id:'entry',calculated_at:new Date().toISOString(),recovery_config:config,next_window:{start:'2026-11-12T22:00:00+01:00',end:'2026-11-13T06:00:00+01:00',status:'planned',reason:'predictive',rows}}}},entities:{},devices:{},locale:{language:'fr'},user:{is_admin:true},callWS:async msg=>{requests.push(msg);return {};},callService:()=>{throw Error('Unexpected hardware/service call');}};
+      const recoveryConfig=structuredClone(config);
+      panel._hass={states:{'sensor.preview':{entity_id:'sensor.preview',state:'planned',attributes:{preview_kind:'tempo_hc_v1',config_entry_id:'entry',calculated_at:new Date().toISOString(),recovery_config:config,next_window:{start:'2026-11-12T22:00:00+01:00',end:'2026-11-13T06:00:00+01:00',status:'planned',reason:'predictive',rows}}}},entities:{},devices:{},locale:{language:'fr'},user:{is_admin:true},callWS:async msg=>{
+        if(msg.type==='omnibattery/phase_soc_recovery/get'){
+          readRequests.push(msg);return {entries:[{entry_id:'entry',title:'Omnibattery',recovery_config:structuredClone(recoveryConfig)}]};
+        }
+        requests.push(msg);Object.assign(recoveryConfig[msg.phase],msg);return {};
+      },callService:()=>{throw Error('Unexpected hardware/service call');}};
       window.batteries=[1,2,3].map(i=>({dev:'d'+i,name:'B'+i,entIds:{battery_soc:'sensor.b'+i},entIdsDomain:{'select:battery_phase':'select.p'+i}}));
       for(const b of batteries){panel._hass.entities[b.entIds.battery_soc]={config_entry_id:'entry'};panel._hass.devices[b.dev]={name:b.name};panel._hass.states[b.entIdsDomain['select:battery_phase']]={state:'l'+b.dev.slice(1)};document.querySelector('#batteries').append(panel._buildBatteryCard(b));}
       panel._batteryModel=()=>batteries;
@@ -52,6 +58,7 @@ with sync_playwright() as p:
     assert page.locator("#control omnibattery-battery-tempo-preview").count()==0
     assert page.locator("omnibattery-phase-recovery-controls form").count()==3
     assert page.evaluate("requests.length")==0
+    assert page.evaluate("readRequests.length")==1
     assert page.evaluate("Array.from(document.querySelectorAll('.bat-card')).every(c=>c.querySelector('.bat-sect').nextElementSibling.tagName==='OMNIBATTERY-BATTERY-TEMPO-PREVIEW')")
     values=page.locator("omnibattery-battery-tempo-preview .value").all_text_contents()
     assert values[0]=="0 kWh" and values[1]=="— kWh" and values[2]=="0,4 kWh",values

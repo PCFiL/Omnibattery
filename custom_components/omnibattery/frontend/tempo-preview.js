@@ -18,8 +18,12 @@ const FR = {
   target_reached: "Objectif atteint", charging: "En charge", predictive: "Déficit prévisionnel",
   tempo_red: "Préparation jour rouge", weekly_full: "Charge complète hebdomadaire",
   soc_recovery: "Recharge minimale de protection", updated: "Dernier calcul",
-  recoveryTitle: "Recharge minimale par phase · heures creuses",
+  recoveryTitle: "Anti-décharge profonde · recharge en heures creuses",
   recoveryNote: "Chaque phase est indépendante. Déclenchement sous le seuil, puis recharge jusqu’à la cible, uniquement de 22 h à 6 h (Europe/Paris). Les protections, le mode manuel et la Pause VE restent prioritaires.",
+  recoveryLoading: "Chargement des réglages…",
+  recoveryEmpty: "Aucune intégration Omnibattery active disponible.",
+  recoveryLoadError: "Impossible de charger les réglages anti-décharge profonde.",
+  retry: "Réessayer",
   enable: "Activer", low: "Déclencher sous", high: "Recharger jusqu’à", save: "Enregistrer",
   saved: "Réglages enregistrés", saving: "Enregistrement…", error: "Échec de l’enregistrement",
   invalid: "Le seuil de déclenchement doit être inférieur à la cible (0 à 100 %).",
@@ -50,8 +54,10 @@ const EN = {
   phase_constraint: "Uncovered phase demand", target_reached: "Target reached", charging: "Charging",
   predictive: "Forecast deficit", tempo_red: "Red-day preparation", weekly_full: "Weekly full charge",
   soc_recovery: "Minimum SOC recovery", updated: "Last calculation",
-  recoveryTitle: "Per-phase minimum recharge · off-peak only",
+  recoveryTitle: "Deep-discharge protection · off-peak recharge",
   recoveryNote: "Each phase is independent. Trigger below the low threshold and charge to the target, only 22:00–06:00 Europe/Paris. Safety guards, manual mode and EV pause keep priority.",
+  recoveryLoading: "Loading settings…", recoveryEmpty: "No active Omnibattery integration available.",
+  recoveryLoadError: "Could not load deep-discharge protection settings.", retry: "Retry",
   enable: "Enable", low: "Trigger below", high: "Charge up to", save: "Save", saved: "Settings saved", saving: "Saving…",
   error: "Could not save", invalid: "Require 0 <= trigger < target <= 100%.",
   needsPD: "Configure and enable this phase PD before enabling recovery.", admin: "Administrator access is required.",
@@ -169,19 +175,46 @@ export function attachPreview(panel, root, list = null) {
 }
 
 class PhaseRecoveryControls extends HTMLElement {
-  constructor() { super(); this.attachShadow({mode: "open"}); this.forms = new Map(); }
+  constructor() {
+    super(); this.attachShadow({mode: "open"}); this.forms = new Map();
+    this.entries = []; this.loaded = false; this.loadError = null;
+    this.lastRefresh = 0; this.refreshing = false; this.revision = 0;
+  }
+  async loadSettings() {
+    this.refreshing = true;
+    this.lastRefresh = Date.now();
+    const revision = this.revision;
+    try {
+      const result = await this.panel._hass.callWS({type: "omnibattery/phase_soc_recovery/get"});
+      // A read started before a save must not restore the old thresholds.
+      if (revision !== this.revision) return;
+      if (!Array.isArray(result?.entries)) throw new Error("Invalid settings response");
+      this.entries = result.entries;
+      this.loaded = true; this.loadError = null;
+    } catch (error) {
+      if (revision === this.revision) this.loadError = error?.message || error?.code || String(error);
+    } finally {
+      this.refreshing = false;
+      this.update(this.panel);
+    }
+  }
   update(panel) {
     this.panel = panel;
     const hass = panel._hass, language = hass.locale?.language || "fr", t = key => tr(language, key);
-    const states = previewStates(panel).sort((a, b) => a.attributes.config_entry_id.localeCompare(b.attributes.config_entry_id));
-    const signature = JSON.stringify([states.map(s => s.attributes.config_entry_id), language]);
+    // Read settings directly: disabling an optional forecast entity must not
+    // hide control forms or prevent saving. Refresh only while Control is in
+    // use, at most every 30 seconds, and preserve any unsaved input.
+    if (!this.refreshing && ![...this.forms.values()].some(f => f.saving)
+        && Date.now() - this.lastRefresh >= 30000) void this.loadSettings();
+    const entries = [...this.entries].sort((a, b) => a.entry_id.localeCompare(b.entry_id));
+    const signature = JSON.stringify([entries.map(entry => entry.entry_id), language]);
     if (signature !== this.structure && ![...this.forms.values()].some(f => f.saving)) {
       this.structure = signature;
       const previousForms = this.forms;
       this.forms = new Map();
       const root = this.shadowRoot; root.replaceChildren();
       const style = node("style");
-      style.textContent = `:host{display:block;margin:18px 0;color:var(--primary-text-color,inherit);min-width:0}
+      style.textContent = `:host{display:block;color:var(--primary-text-color,inherit);min-width:0}
         .card{border:1px solid var(--divider-color,#454545);border-radius:14px;padding:18px;background:var(--ha-card-background,var(--bg-1,#181b1c))}
         h3{font-size:16px;margin:0 0 8px}.note,.message,.status{font-size:12px;line-height:1.5;overflow-wrap:anywhere}.note{opacity:.75}
         .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:16px;margin-top:16px}
@@ -192,11 +225,15 @@ class PhaseRecoveryControls extends HTMLElement {
         button:disabled{opacity:.5;cursor:default}.message{margin-top:8px}.warning{color:var(--warning-color,#f0b634)}.good{color:var(--battery,#60cc8a)}`;
       const card = node("section", null, "card");
       card.append(node("h3", t("recoveryTitle")), node("div", t("recoveryNote"), "note"), node("div", t("rule"), "note"));
+      this.loadMessage = node("div", null, "message warning");
+      this.loadMessage.setAttribute("aria-live", "polite");
+      this.retryButton = node("button", t("retry")); this.retryButton.type = "button";
+      this.retryButton.addEventListener("click", () => { this.lastRefresh = 0; this.update(this.panel); });
+      this.emptyMessage = node("div", null, "message");
+      card.append(this.loadMessage, this.retryButton, this.emptyMessage);
       root.append(style, card);
-      if (!states.length) card.append(node("div", t("noData"), "warning"));
-      for (const state of states) {
-        const a = state.attributes;
-        if (states.length > 1) card.append(node("h4", a.entry_title || a.config_entry_id));
+      for (const entry of entries) {
+        if (entries.length > 1) card.append(node("h4", entry.title || entry.entry_id));
         const grid = node("div", null, "grid"); card.append(grid);
         for (const phase of ["L1", "L2", "L3"]) {
           const form = node("form"), heading = node("h4"), fields = {};
@@ -211,37 +248,48 @@ class PhaseRecoveryControls extends HTMLElement {
           const button = node("button", t("save")); button.type = "submit";
           const status = node("div", null, "status"), message = node("div", null, "message"); message.setAttribute("aria-live", "polite");
           form.append(button, status, message); grid.append(form);
-          const record = {entry: a.config_entry_id, phase, form, heading, fields, button, status, message, dirty: false, saving: false};
-          const previous = previousForms.get(`${a.config_entry_id}:${phase}`);
+          const record = {entry: entry.entry_id, phase, form, heading, fields, button, status, message, dirty: false, saving: false};
+          const previous = previousForms.get(`${entry.entry_id}:${phase}`);
           if (previous?.dirty) {
             record.dirty = true;
             fields.enabled.checked = previous.fields.enabled.checked;
             fields.start_soc.value = previous.fields.start_soc.value;
             fields.target_soc.value = previous.fields.target_soc.value;
           }
-          this.forms.set(`${a.config_entry_id}:${phase}`, record);
+          this.forms.set(`${entry.entry_id}:${phase}`, record);
           form.addEventListener("submit", async event => {
             event.preventDefault(); event.stopPropagation();
+            if (record.saving || this.panel._hass.user?.is_admin === false) return;
             const low = Number(fields.start_soc.value), high = Number(fields.target_soc.value);
             if (!fields.start_soc.value || !fields.target_soc.value || !Number.isFinite(low) || !Number.isFinite(high) || low < 0 || high > 100 || low >= high) {
               message.textContent = t("invalid"); message.className = "message warning"; return;
             }
             record.saving = true; button.disabled = true; message.textContent = t("saving");
+            for (const field of Object.values(fields)) field.disabled = true;
+            this.revision += 1;
             try {
+              const settings = {enabled: fields.enabled.checked, start_soc: low, target_soc: high};
               await this.panel._hass.callWS({type: "omnibattery/phase_soc_recovery/configure", entry_id: record.entry,
-                phase, enabled: fields.enabled.checked, start_soc: low, target_soc: high});
+                phase, ...settings});
+              const current = this.entries.find(item => item.entry_id === record.entry);
+              if (current?.recovery_config?.[phase]) Object.assign(current.recovery_config[phase], settings);
               record.dirty = false; message.textContent = t("saved"); message.className = "message good";
+              this.lastRefresh = 0;
             } catch (error) {
               message.textContent = `${t("error")}: ${error?.message || error?.code || String(error)}`;
               message.className = "message warning";
-            } finally { record.saving = false; button.disabled = false; }
+            } finally { record.saving = false; this.update(this.panel); }
           });
         }
       }
     }
-    for (const state of states) for (const phase of ["L1", "L2", "L3"]) {
-      const a = state.attributes, cfg = a.recovery_config?.[phase];
-      const record = this.forms.get(`${a.config_entry_id}:${phase}`);
+    this.loadMessage.textContent = this.loadError ? `${t("recoveryLoadError")} ${this.loadError}` : "";
+    this.retryButton.hidden = !this.loadError;
+    this.retryButton.disabled = this.refreshing;
+    this.emptyMessage.textContent = entries.length || this.loadError ? "" : t(this.loaded ? "recoveryEmpty" : "recoveryLoading");
+    for (const entry of entries) for (const phase of ["L1", "L2", "L3"]) {
+      const cfg = entry.recovery_config?.[phase];
+      const record = this.forms.get(`${entry.entry_id}:${phase}`);
       if (!record || !cfg) continue;
       record.heading.textContent = `${phase.replace("L", "P")} · ${cfg.battery || "—"}`;
       if (!record.dirty && !record.saving) {
@@ -251,6 +299,7 @@ class PhaseRecoveryControls extends HTMLElement {
       }
       const admin = hass.user?.is_admin !== false;
       record.button.disabled = record.saving || !admin;
+      for (const field of Object.values(record.fields)) field.disabled = record.saving || !admin;
       record.status.textContent = !admin ? t("admin") : !cfg.phase_enabled ? t("needsPD") : t(cfg.enabled ? cfg.status || "idle" : "disabled");
     }
   }
@@ -263,8 +312,17 @@ export function attachRecoveryControls(panel, root) {
   root.querySelectorAll("omnibattery-tempo-preview").forEach(e => e.remove());
   const target = root.matches?.(".ctl-root") ? root : root.querySelector(".ctl-root");
   if (!target) return;
-  let controls = target.querySelector("omnibattery-phase-recovery-controls");
-  if (!controls) { controls = document.createElement("omnibattery-phase-recovery-controls"); target.append(controls); }
+  let controls = target.querySelector("omnibattery-phase-recovery-controls") || panel._phaseRecoveryControls;
+  if (!controls) {
+    controls = document.createElement("omnibattery-phase-recovery-controls");
+  }
+  panel._phaseRecoveryControls = controls;
+  if (controls.parentNode !== target) {
+    // Keep the settings visible immediately below the Control toolbar, ahead
+    // of the feature grid. Reuse the instance on layout/tab rebuilds so an
+    // unsaved draft or pending save is not discarded with the old DOM.
+    target.insertBefore(controls, target.querySelector(":scope > .sys-stack"));
+  }
   controls.update(panel);
 }
 customElements.whenDefined("marstek-venus-panel").then(() => {
