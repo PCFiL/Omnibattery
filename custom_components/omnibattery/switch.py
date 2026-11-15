@@ -42,6 +42,7 @@ from .const import (
     CONF_PRICE_DISCHARGE_CONTROL,
     CONF_SMART_PREDISCHARGE_ENABLED,
     CONF_NEGATIVE_PRICE_CHARGING_ENABLED,
+    PREDICTIVE_MODE_TIME_SLOT,
     PREDICTIVE_MODE_DYNAMIC_PRICING,
     PREDICTIVE_MODE_REALTIME_PRICE,
     CONF_SYSTEM_MAX_CHARGE_POWER,
@@ -640,6 +641,15 @@ class PredictiveChargingSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         """Enable predictive charging (set enabled, clear override)."""
+        if (
+            not self.is_on
+            and self.controller.predictive_charging_mode == PREDICTIVE_MODE_TIME_SLOT
+        ):
+            # Re-enable is an explicit request to evaluate the current window,
+            # even if the previous decision is younger than the inactive retry
+            # interval. Repeated ON calls must retain an active SOC target.
+            self.controller.last_evaluation_soc = None
+            self.controller._time_slot_last_evaluation_at = None
         self.controller.predictive_charging_enabled = True
         self.controller.predictive_charging_overridden = False
         new_data = dict(self.entry.data)

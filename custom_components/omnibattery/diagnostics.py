@@ -582,6 +582,133 @@ def _dynamic_pricing_info(controller) -> dict[str, Any]:
     return info
 
 
+def _predictive_charging_info(controller, coordinators) -> dict[str, Any]:
+    """Expose the complete request/dispatch boundary without running a planner.
+
+    A charge request, an accepted setpoint and delivered power are different
+    facts. Keep all three visible, including when Time Slot never activated;
+    the dynamic-price calendar alone cannot explain an idle HC night.
+    """
+    if controller is None:
+        return {"status": "controller_unavailable"}
+
+    from homeassistant.util import dt as dt_util
+
+    from .control.edf_tempo import PARIS, is_tempo_offpeak
+
+    now = dt_util.now().astimezone(PARIS)
+    enabled = bool(getattr(controller, "predictive_charging_enabled", False))
+    overridden = bool(getattr(controller, "predictive_charging_overridden", False))
+    active_slot = None
+    window_error = None
+    slot_reader = getattr(controller, "_active_charging_slot", None)
+    if callable(slot_reader):
+        try:
+            active_slot = slot_reader()
+        except (AttributeError, TypeError, ValueError) as exc:
+            window_error = str(exc)
+
+    blockers, reasons = _charge_blocker_info(controller)
+    decision = getattr(controller, "_last_decision_data", None) or {}
+    # Dated forecast arrays/objects are already represented by the balance and
+    # forecast diagnostics. Do not duplicate thousands of periods in this view.
+    decision_summary = {
+        key: value for key, value in decision.items()
+        if isinstance(value, (type(None), bool, int, float, str))
+        or callable(getattr(value, "isoformat", None))
+    }
+    targets = {
+        getattr(coordinator, "name", str(coordinator)): target
+        for coordinator, target in (
+            getattr(controller, "_predictive_charge_target_soc", None) or {}
+        ).items()
+    }
+    runtime = getattr(controller, "_phase_runtime", None)
+    phase_by_battery = {
+        channel.battery_key: channel.phase
+        for channel in getattr(runtime, "channels", ())
+        if channel.enabled
+    }
+    planner = getattr(getattr(runtime, "manager", None), "planner", None)
+    phase_states = getattr(planner, "states", {})
+    phase_status = getattr(runtime, "safety_status", {})
+    phase_owners = getattr(runtime, "_last_grid_charge_owner", {})
+
+    batteries = {}
+    for coordinator in coordinators:
+        name = coordinator.name
+        phase = phase_by_battery.get(name)
+        state = phase_states.get(name)
+        telemetry = getattr(coordinator, "data", None) or {}
+        batteries[name] = {
+            "phase": phase,
+            "phase_status": phase_status.get(phase),
+            "charge_owner": phase_owners.get(phase),
+            "available": getattr(coordinator, "is_available", None),
+            "manual": bool(getattr(coordinator, "battery_manual_mode_enabled", False)),
+            "target_soc": _rounded_number(targets.get(name)),
+            "phase_target_soc": _rounded_number(
+                getattr(controller, "_phase_predictive_targets", {}).get(name)
+            ),
+            "last_accepted_phase_command_w": _rounded_number(
+                getattr(state, "last_command_w", None), 1
+            ),
+            "credited_ac_power_w": _rounded_number(
+                getattr(runtime, "_grid_charge_feedback_w", {}).get(phase), 1
+            ),
+            "reserved_grid_increase_w": _rounded_number(
+                getattr(runtime, "_grid_charge_pending_w", {}).get(phase), 1
+            ),
+            "commanded_charge_power_w": _rounded_number(
+                getattr(coordinator, "commanded_charge_power", None), 1
+            ),
+            "telemetry": {
+                key: _safe_number(telemetry.get(key))
+                for key in (
+                    "battery_soc", "battery_total_energy", "battery_power",
+                    "ac_delivered_power", "ac_mode", "input_limit",
+                    "output_limit", "max_charge_power", "pack_count",
+                )
+            },
+        }
+
+    sensor_id = getattr(controller, "consumption_sensor", None)
+    states = getattr(getattr(controller, "hass", None), "states", None)
+    meter = states.get(sensor_id) if states is not None and sensor_id else None
+    return _json_safe({
+        "observed_at": now,
+        "enabled": enabled,
+        "overridden": overridden,
+        "effective_enabled": enabled and not overridden,
+        "mode": getattr(controller, "predictive_charging_mode", None),
+        "offpeak": is_tempo_offpeak(now),
+        "configured_windows": getattr(controller, "charging_time_slots", []),
+        "active_configured_window": active_slot,
+        "window_error": window_error,
+        "last_evaluated_window": getattr(controller, "_time_slot_active_window", None),
+        "last_evaluated_at": getattr(controller, "_time_slot_last_evaluation_at", None),
+        "grid_charge_requested": bool(getattr(controller, "grid_charging_active", False)),
+        "initialized": bool(getattr(controller, "_grid_charging_initialized", False)),
+        "global_manual": bool(getattr(controller, "manual_mode_enabled", False)),
+        "ev_pause": bool(getattr(controller, "ev_charging_pause_enabled", False)),
+        "demand_state": getattr(controller, "_predictive_demand_state", None),
+        "active_window_quota_kwh": _rounded_number(
+            getattr(controller, "_active_time_slot_quota_kwh", None)
+        ),
+        "decision": decision_summary,
+        "charge_blockers": blockers,
+        "charge_block_reasons": reasons,
+        "grid_meter": {
+            "entity_id": sensor_id,
+            "state": getattr(meter, "state", None),
+            "unit": (getattr(meter, "attributes", {}) or {}).get("unit_of_measurement"),
+            # last_changed is not evidence of freshness for a stable reading.
+            "last_reported": getattr(meter, "last_reported", None),
+        },
+        "batteries": batteries,
+    })
+
+
 def _timeline_int(value: object) -> int | None:
     """Return a finite non-negative integer for timeline counters."""
     try:
@@ -954,6 +1081,9 @@ async def async_get_config_entry_diagnostics(
             "automatic_batteries": automatic_batteries,
         },
         "dynamic_pricing": _dynamic_pricing_info(controller),
+        "predictive_charging": async_redact_data(
+            _predictive_charging_info(controller, coordinators), TO_REDACT
+        ),
         "daily_operation_timeline": _daily_operation_timeline_summary(controller),
         "consumption_profile": consumption_profile,
         "recorder_backfill": recorder_backfill,

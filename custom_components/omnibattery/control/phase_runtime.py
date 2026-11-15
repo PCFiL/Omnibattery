@@ -7,13 +7,26 @@ so hardware blockers, SOC and power ceilings remain authoritative.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from math import isfinite
 from time import monotonic
 
+from ..drivers import DELIVERED_AC_POWER_KEY
 from .phase_channels import PhaseChannel, PhaseChannelManager
 from .phase_meter_fallback import select_phase_meter
 
 _LOGGER = logging.getLogger(__name__)
 KEY = "phase_pd_channels"
+
+
+@dataclass
+class _GridChargeAttempt:
+    requested_w: float
+    reserved_w: float
+    at: datetime
+    last_attempt_at: float
+    accepted: bool
 
 
 def configured_channels(entry, coordinators):
@@ -59,6 +72,7 @@ class PhaseRuntime:
     STOP_RETRY_S = 5.0
     STOP_REASSERT_S = 30.0
     METER_RECOVERY_S = 10.0
+    GRID_FEEDBACK_SETTLE_S = 4.0
 
     def __init__(self, controller):
         self.controller = controller
@@ -86,6 +100,148 @@ class PhaseRuntime:
         self._last_grid_charge_owner: dict[str, str] = {}
         self._soc_recovery = None
         self._predictive_soc_hold = None
+        self._grid_charge_attempts: dict[str, _GridChargeAttempt] = {}
+        self._grid_charge_feedback_w: dict[str, float] = {}
+        self._grid_charge_pending_w: dict[str, float] = {}
+        self._grid_charge_observed_raise: dict[str, tuple[float, datetime]] = {}
+
+    def _refresh_grid_charge_feedback(self, wall_now):
+        """Reserve attempted watts until AC and both meters have caught up.
+
+        A write ACK is never a measurement. In particular Zendure's HTTP 200
+        does not prove its inverter accepted the command. AC feedback may also
+        arrive before the grid meter; credit an increase only after all three
+        have reported beyond the command's settling window.
+        """
+        ctl = self.controller
+        global_state = ctl.hass.states.get(getattr(ctl, "consumption_sensor", ""))
+        global_stamp = getattr(global_state, "last_reported", None)
+        pending = {}
+        for channel in self.channels:
+            phase = channel.phase
+            battery = self.by_name[channel.battery_key]
+            data = battery.data or {}
+            # A known AC key with missing data must not fall back to DC cell
+            # charging: the MIX PRO can absorb solar without importing AC.
+            if "ac_power" in data:
+                key, sign = "ac_power", -1
+            elif DELIVERED_AC_POWER_KEY in data:
+                key, sign = DELIVERED_AC_POWER_KEY, 1
+            else:
+                key, sign = "battery_power", 1
+            try:
+                measured = float(data[key]) * sign
+                if not isfinite(measured):
+                    measured = None
+            except (KeyError, TypeError, ValueError):
+                measured = None
+            times = getattr(battery, "_key_update_times", None)
+            sample_stamp = times.get(key) if times is not None else wall_now
+            if times is not None and (
+                sample_stamp is None
+                or not 0 <= (wall_now - sample_stamp).total_seconds() <= 15
+            ):
+                measured = None
+            selected = select_phase_meter(
+                ctl.hass.states, phase=phase,
+                primary_entity_id=channel.grid_sensor,
+                fallback_entity_id=self._fallback_by_phase.get(phase),
+                max_age_s=15,
+            )
+            phase_state = ctl.hass.states.get(selected.entity_id) if selected.entity_id else None
+            phase_stamp = getattr(phase_state, "last_reported", None)
+            attempt = self._grid_charge_attempts.get(phase)
+            other_owner = (
+                ctl._is_battery_manual_owned(battery)
+                or ctl._is_backup_function_active(battery)
+                or ctl._is_manual_slot_owned(battery)
+            )
+            if other_owner:
+                try:
+                    owned_request = float(getattr(battery, "commanded_charge_power", 0) or 0)
+                    owned_request -= float(getattr(battery, "commanded_discharge_power", 0) or 0)
+                except (TypeError, ValueError):
+                    owned_request = None
+                if (owned_request is not None and isfinite(owned_request)
+                        and (attempt is None or attempt.requested_w != owned_request)):
+                    # Observe the current owner's new intent without writing.
+                    # Reserve increases now; confirm reductions by the same
+                    # post-command feedback required for automatic requests.
+                    self._reserve_grid_charge_attempt(phase, owned_request)
+                    attempt = self._grid_charge_attempts[phase]
+            settled_after = (
+                attempt.at + timedelta(seconds=self.GRID_FEEDBACK_SETTLE_S)
+                if attempt is not None else sample_stamp
+            )
+            settled = (
+                measured is not None and settled_after is not None
+                and selected.reading.power_w is not None
+                and all(stamp is not None and stamp >= settled_after
+                        for stamp in (sample_stamp, phase_stamp, global_stamp))
+            )
+            previous = self._grid_charge_feedback_w.get(phase, 0.0)
+            prior = self.manager.planner.states[channel.battery_key]
+            if measured is None:
+                # Unknown delivery grants no charging credit, and cannot hide
+                # the import cost of stopping a previously commanded discharge.
+                credit = min(previous, 0.0, prior.last_command_w)
+                self._grid_charge_observed_raise.pop(phase, None)
+            elif measured <= previous:
+                credit = measured
+                self._grid_charge_observed_raise.pop(phase, None)
+            else:
+                # The inverter may finally start an hour after an accepted
+                # command. Old-but-fresh meters can then predate the real AC
+                # increase despite being well past the original settle timer.
+                # Keep the minimum sustained increase and its first sample;
+                # repeated/noisy samples must not postpone that timestamp.
+                raised = self._grid_charge_observed_raise.get(phase)
+                if raised is None:
+                    raised = (measured, sample_stamp)
+                else:
+                    raised = (min(raised[0], measured), raised[1])
+                self._grid_charge_observed_raise[phase] = raised
+                meters_saw_raise = all(
+                    stamp is not None and stamp >= raised[1]
+                    for stamp in (phase_stamp, global_stamp)
+                )
+                if settled and meters_saw_raise:
+                    credit = raised[0]
+                    self._grid_charge_observed_raise.pop(phase, None)
+                else:
+                    credit = previous
+            self._grid_charge_feedback_w[phase] = credit
+            if attempt is not None:
+                if settled:
+                    attempt.reserved_w = attempt.requested_w
+                reserved = attempt.reserved_w
+            else:
+                reserved = 0.0
+            # A delayed older command can arrive after a later stop. Its
+            # observed AC rise still needs room until both meters include it.
+            pending[phase] = max(0.0, max(reserved, measured if measured is not None else credit) - credit)
+        self._grid_charge_pending_w = pending
+        self._tempo_reserved_increment_w = sum(pending.values())
+
+    def _reserve_grid_charge_attempt(self, phase, command_w, *, accepted=True):
+        """Keep unmeasured increases, including uncertain writes, reserved."""
+        from homeassistant.util import dt as dt_util
+        old = self._grid_charge_attempts.get(phase)
+        reserved = max(command_w, old.reserved_w if old is not None else command_w)
+        # Revalidation is often a no-op at the driver. Do not keep moving the
+        # settling deadline ahead of a slower (but still fresh) grid meter.
+        started = old.at if old is not None and old.requested_w == command_w else dt_util.utcnow()
+        self._grid_charge_attempts[phase] = _GridChargeAttempt(
+            command_w, reserved, started, monotonic(), accepted,
+        )
+        before = self._grid_charge_pending_w.get(phase, 0.0)
+        after = max(0.0, reserved - self._grid_charge_feedback_w.get(phase, 0.0))
+        # Never make room for another phase based on a reduction's ACK alone.
+        self._tempo_reserved_increment_w = (
+            getattr(self, "_tempo_reserved_increment_w", 0.0)
+            + max(0.0, after - before)
+        )
+        self._grid_charge_pending_w[phase] = max(before, after)
 
     def _performance(self, phase):
         """Return optional instrumentation without affecting battery control."""
@@ -132,6 +288,7 @@ class PhaseRuntime:
                 "Phase %s: 0W safety command failed unexpectedly", phase
             )
             ok = False
+        self._reserve_grid_charge_attempt(phase, 0, accepted=ok)
         perf = self._performance(phase)
         if perf is not None:
             perf.command(accepted=ok, standby=True)
@@ -224,8 +381,7 @@ class PhaseRuntime:
                 from ..phase_recovery_config import get_manager
                 self._soc_recovery = get_manager(ctl.hass, ctl.config_entry)
             await self._soc_recovery.async_load()
-        # Reserve headroom across all phase decisions inside one controller cycle.
-        self._tempo_reserved_increment_w = 0.0
+        self._refresh_grid_charge_feedback(wall_now)
         for channel in self.channels:
             if not channel.enabled:
                 continue
@@ -337,12 +493,12 @@ class PhaseRuntime:
                         battery, max(0, limited), max(0, -limited),
                         owner=f"phase:{phase}", force_write=True,
                     )
+                    self._reserve_grid_charge_attempt(phase, limited, accepted=ok)
                     if ok:
                         self.manager.acknowledge(phase, limited, now=now)
                 # Reducing discharge increases import. Reserve that attempted
                 # increase even on an uncertain ACK; never credit an unmeasured
                 # charge reduction as spare headroom for the following phases.
-                self._tempo_reserved_increment_w += max(0.0, limited - old_command)
                 self.safety_status[phase] = (
                     "predictive_reserve_stop_command_accepted" if ok and holding_reserve
                     else "power_limit_command_accepted" if ok
@@ -395,7 +551,6 @@ class PhaseRuntime:
             if forced_charge_mode is not None:
                 self._last_grid_charge_owner[phase] = forced_charge_mode
                 from .edf_tempo import phase_tempo_charge_request
-                from math import isfinite
 
                 # A fresh global grid meter is mandatory: if unavailable,
                 # actively request safe standby rather than charging blindly.
@@ -411,14 +566,17 @@ class PhaseRuntime:
                     self.safety_status[phase] = f"{forced_charge_mode}_global_meter_invalid_or_stale"
                     continue
 
-                # Preserve the existing channel rate limit and phase owner.
                 prior = self.manager.planner.states[channel.battery_key]
-                if (
-                    prior.last_command_at is not None
-                    and now - prior.last_command_at < channel.min_command_interval_s
-                ):
-                    self.safety_status[phase] = f"{forced_charge_mode}_rate_limited"
-                    continue
+                last_attempt_at = prior.last_command_at
+                attempt = self._grid_charge_attempts.get(phase)
+                if attempt is not None and not attempt.accepted:
+                    last_attempt_at = max(last_attempt_at or 0, attempt.last_attempt_at)
+                rate_limited = (
+                    last_attempt_at is not None
+                    and now - last_attempt_at < max(
+                        channel.min_command_interval_s, self.GRID_FEEDBACK_SETTLE_S,
+                    )
+                )
 
                 # The same contracted import and per-phase power safeguards
                 # apply to weekly and Tempo charging. After each accepted
@@ -426,13 +584,17 @@ class PhaseRuntime:
                 # in this very cycle (global meter reading may not update yet).
                 remaining = float(ctl._predictive_charge_ceiling()) - float(global_power)
                 remaining -= getattr(self, "_tempo_reserved_increment_w", 0.0)
+                # Its own outstanding command is already allocated to this
+                # phase. Other phases' unmeasured requests remain unavailable.
+                remaining += self._grid_charge_pending_w.get(phase, 0.0)
+                delivered = self._grid_charge_feedback_w.get(phase, 0.0)
 
                 # A phase previously discharging at -X W would increase grid
                 # import by X W just by stopping discharge. Never send +charge
                 # directly from -discharge based on charge-only headroom.
                 # Stop first, wait for a fresh meter sample and ramp charging
                 # in a later controller cycle.
-                old_signed_w = float(prior.last_command_w)
+                old_signed_w = delivered
                 if old_signed_w < 0:
                     phase_headroom = float(
                         ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500)
@@ -443,12 +605,15 @@ class PhaseRuntime:
                             f"{forced_charge_mode}_waiting_discharge_release_headroom"
                         )
                         continue
+                    if rate_limited:
+                        self.safety_status[phase] = f"{forced_charge_mode}_rate_limited"
+                        continue
                     stopped = await ctl._set_battery_power(
                         battery, 0, 0, owner=f"phase:{phase}"
                     )
                     # Stopping discharge may increase import even if its ACK
                     # is lost. Reserve that attempt for following phases too.
-                    self._tempo_reserved_increment_w += release_w
+                    self._reserve_grid_charge_attempt(phase, 0, accepted=stopped)
                     if stopped:
                         self.manager.acknowledge(phase, 0, now=now)
                         self.safety_status[phase] = (
@@ -470,7 +635,7 @@ class PhaseRuntime:
                     max_charge = 0
                 request = phase_tempo_charge_request(
                     grid_power_w=float(selected.reading.power_w),
-                    previous_command_w=prior.last_command_w,
+                    previous_command_w=delivered,
                     battery_max_charge_w=max_charge,
                     phase_import_limit_w=float(
                         ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500)
@@ -479,17 +644,28 @@ class PhaseRuntime:
                     max_step_w=channel.max_step_w,
                 )
                 last = prior.last_command_w
-                if request == last:
+                last_attempt = attempt.requested_w if attempt is not None else last
+                if request == last == last_attempt == 0 and delivered == 0:
                     self.safety_status[phase] = f"{forced_charge_mode}_no_change"
+                    continue
+                # Protective reductions bypass pacing. Unchanged positive
+                # requests must still reach the guarded writer, which checks
+                # native setpoints/delivery and skips HTTP only when healthy.
+                if request >= max(last, last_attempt) and rate_limited:
+                    self.safety_status[phase] = f"{forced_charge_mode}_rate_limited"
                     continue
                 if request != 0:
                     self._invalidate_stop_ack(phase)
-                ok = await ctl._set_battery_power(
-                    battery, request, 0, owner=f"phase:{phase}",
-                )
-                # An uncertain ACK is not evidence that the inverter ignored
-                # the command. Reserve every attempted increase for this cycle.
-                self._tempo_reserved_increment_w += max(0.0, request - max(0.0, last))
+                    ok = await ctl._set_battery_power(
+                        battery, request, 0, owner=f"phase:{phase}",
+                    )
+                    # An uncertain ACK is not evidence that the inverter
+                    # ignored the request. Keep its potential import reserved.
+                    self._reserve_grid_charge_attempt(phase, request, accepted=ok)
+                else:
+                    # A lost ACK may have left a positive command in flight
+                    # while both the planner and native telemetry still say 0.
+                    ok = await self._force_zero(channel, battery, now=now)
                 if ok:
                     self.manager.acknowledge(phase, request, now=now)
                     self.safety_status[phase] = f"{forced_charge_mode}_charge_command_accepted"
@@ -517,6 +693,7 @@ class PhaseRuntime:
                 ok = await ctl._set_battery_power(
                     battery, 0, 0, owner=f"phase:{phase}", force_write=True,
                 )
+                self._reserve_grid_charge_attempt(phase, 0, accepted=ok)
                 if ok:
                     self.manager.acknowledge(phase, 0, now=now)
                     self.safety_status[phase] = "tempo_red_peak_charge_stopped"
@@ -541,6 +718,7 @@ class PhaseRuntime:
                 battery, max(0, proposed), max(0, -proposed),
                 owner=f"phase:{phase}",
             )
+            self._reserve_grid_charge_attempt(phase, proposed, accepted=ok)
             perf = self._performance(phase)
             if perf is not None:
                 perf.command(accepted=ok)

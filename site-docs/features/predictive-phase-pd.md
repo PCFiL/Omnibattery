@@ -46,12 +46,11 @@ supplies real, timestamped `solar_forecast_periods` / `forecast_periods` /
 through tomorrow 22:00, and the energy from the dated periods is prorated
 over that horizon.
 
-When no such dated future solar forecast is available, the existing
-same-day prediction remains authoritative. A scalar sensor that reports
-today's forecast must never be mistaken for tomorrow's production. In
-that case, next-day weather optimisation is *not available*, and the
-diagnostics should be interpreted accordingly. This change does not add
-a new weather provider.
+When no such dated future solar forecast is available, the evening plan still
+covers consumption until the next dawn, without inventing tomorrow's solar
+production. A scalar sensor that reports today's forecast must never be
+mistaken for tomorrow's production. In that case, next-day weather optimisation
+is *not available*. This change does not add a new weather provider.
 
 ## Testing
 
@@ -123,3 +122,65 @@ weekday anchoring, and low-SOC recovery handoffs. GitHub Actions runs the
 These tests establish software behavior; they do not establish which code or
 settings a particular Home Assistant installation has loaded, or verify
 physical battery delivery.
+
+## Re-enabling and diagnosing a night without charge
+
+Saving an enabled predictive configuration clears the legacy pause flag as
+well as enabling the feature. This applies to Time Slot, Dynamic Pricing and
+Real-Time Price. Saving unrelated settings or restoring a deliberately paused
+configuration preserves that pause.
+
+Turning the predictive switch back on in Time Slot mode invalidates the old
+inactive decision and evaluates the current authorized window on the next
+control cycle. Repeated ON calls during an active charge retain its SOC target;
+enabling the switch outside the permitted window does not authorize charging.
+
+While a grid-charge target is pending, an unchanged positive request still
+passes through the guarded writer at the permitted cadence. The writer skips
+network traffic when the native setpoint and delivery agree, and reasserts a
+request that the device has lost or is not following. Failed attempts are
+paced too; a protective stop can cancel an uncertain positive request even
+when its acknowledgement was lost.
+
+Import headroom uses reported AC delivery instead of adding the previously
+requested watts to the budget. Requests that have not yet appeared on the
+meters stay reserved across phases and cycles. A returned AC measurement does
+not release that reservation until both grid meters have caught up, including
+when a device resumes after a long stall. DC solar charging on a MIX PRO does
+not count as grid charging. Manual ownership and the existing power, BMS,
+temperature, EV and schedule boundaries continue to apply.
+
+The integration's **Download diagnostics** export now includes a
+`predictive_charging` section for all three modes. It records the effective
+enable/pause flags, configured and active windows, last decision, energy
+quota, per-battery SOC targets, charge blockers and phase status. It also
+separates the accepted power command from the reported battery/AC power and
+includes reported capacity, device setpoints and the grid meter's last
+publication time. A successful HTTP request is not evidence of physical
+charging. Reading the export does not re-evaluate the plan or send commands.
+
+Version **1.6.1** identifies this corrective release in Home Assistant's
+integration manifest and diagnostics. Updating the GitHub checkout alone does
+not update the code already loaded by Home Assistant; install the updated
+custom component and restart Home Assistant to load it.
+
+`tests/test_nightly_realistic_inputs.py` additionally runs full overnight
+scenarios with the real consumption trackers, cold or learned profiles, AROME
+15-minute forecasts (complete or incomplete), and capacity inferred from
+Zendure reports. The transport tests in
+`tests/test_zendure_phase_command_feedback.py` use the actual Zendure drivers
+and coordinators with simulated HTTP responses to check accepted commands
+against reported delivery.
+
+### Validation of version 1.6.1
+
+The expanded `nightly-charging` selection passes all **266 tests**, including
+the new configuration, live-enable, real-input, Zendure-feedback and diagnostic
+regressions. Of the 24 activation/transport cases run against the previous
+`8879c7a` revision, 18 fail before the correction and all 24 pass afterward.
+
+The full local suite passes 3,227 tests, compared with 3,192 on `8879c7a`.
+Both revisions have the same 184 failing tests and 11 fixture/setup errors,
+with the same failure identifiers; no new full-suite failure was observed.
+These are local software results, not a claim of live battery verification
+or a green full GitHub Actions run.

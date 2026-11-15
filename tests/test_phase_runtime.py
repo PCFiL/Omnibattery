@@ -142,7 +142,7 @@ async def test_weekly_grid_charge_respects_per_phase_import_ceiling():
 
 
 @pytest.mark.asyncio
-async def test_weekly_charge_stops_prior_discharge_before_charging():
+async def test_weekly_charge_stops_prior_discharge_before_charging(freezer):
     ctl = FakeController(sensor_value="300")
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
@@ -161,7 +161,9 @@ async def test_weekly_charge_stops_prior_discharge_before_charging():
     await runtime.run()
     assert ctl.writes[-1] == ("mix_ac_1", 0, 0, "phase:L3")
     assert runtime.safety_status["L3"] == "weekly_discharge_stopped_before_charge"
-    prior.last_command_at -= 6
+    # An ACK alone cannot prove the previous discharge physically stopped.
+    ctl.coordinators[0].data["battery_power"] = 0
+    freezer.tick(6)
     await runtime.run()
     assert ctl.writes[-1][1] > 0
 

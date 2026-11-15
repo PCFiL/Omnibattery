@@ -85,6 +85,11 @@ jobs:
               # Battery I/O is simulated; this does not contact live devices.
               python -m pytest -v --junitxml="$report" \
                 tests/test_nightly_charge_orchestration.py \
+                tests/test_nightly_realistic_inputs.py \
+                tests/test_zendure_phase_command_feedback.py \
+                tests/test_predictive_options_reenable.py \
+                tests/test_predictive_live_reenable.py \
+                tests/test_predictive_charge_diagnostics.py \
                 tests/test_time_slot_overnight_regressions.py \
                 tests/test_manual_slot_schedule.py \
                 tests/test_time_slot_power_limits.py \

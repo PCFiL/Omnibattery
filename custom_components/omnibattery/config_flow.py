@@ -66,6 +66,7 @@ from .solar_forecast import normalize_solar_forecast_config
 from .const import (
     DOMAIN,
     CONF_ENABLE_PREDICTIVE_CHARGING,
+    CONF_PREDICTIVE_CHARGING_OVERRIDDEN,
     CONF_CHARGING_TIME_SLOT,
     CONF_SOLAR_FORECAST_SENSOR,
     CONF_SOLAR_FORECAST_REMAINING_SENSOR,
@@ -5871,6 +5872,7 @@ class OptionsFlowHandler(OptionsFlow):
 
                 if not errors:
                     self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_OVERRIDDEN] = False
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_TIME_SLOT
                     self.config_data["charging_time_slot"] = windows
                     self.config_data[CONF_SOLAR_FORECAST_SENSOR] = forecast_sensor
@@ -5934,6 +5936,7 @@ class OptionsFlowHandler(OptionsFlow):
 
                 if not errors:
                     self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_OVERRIDDEN] = False
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_DYNAMIC_PRICING
                     self.config_data[CONF_PRICE_INTEGRATION_TYPE] = integration_type
                     self.config_data[CONF_PRICE_SENSOR] = price_sensor
@@ -6047,6 +6050,7 @@ class OptionsFlowHandler(OptionsFlow):
 
                 if not errors:
                     self.config_data["enable_predictive_charging"] = True
+                    self.config_data[CONF_PREDICTIVE_CHARGING_OVERRIDDEN] = False
                     self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_REALTIME_PRICE
                     self.config_data[CONF_PRICE_SENSOR] = price_sensor
                     self.config_data[CONF_AVERAGE_PRICE_SENSOR] = user_input.get(CONF_AVERAGE_PRICE_SENSOR) or None
