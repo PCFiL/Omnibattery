@@ -48,17 +48,16 @@ def _manager(**overrides):
     return manager
 
 
-@pytest.mark.parametrize("now", [_at(8, 23), _at(9, 0), _at(9, 5, 30)])
+@pytest.mark.parametrize("now", [_at(8, 23), _at(9, 0), _at(9, 5, 29)])
 def test_planner_deadline_matches_explicit_overnight_schedule(now):
     manager = _manager()
 
-    # The existing schedule includes its end minute; the planner's exclusive
-    # deadline is therefore 05:31, never the later sunrise.
-    assert manager.window_end(now) == _at(9, 5, 31)
+    # The configured finish is exclusive for both runtime and planner.
+    assert manager.window_end(now) == _at(9, 5, 30)
     assert manager.in_overnight_extension(now) is (now.day == 9)
 
 
-@pytest.mark.parametrize("now", [_at(8, 21), _at(9, 5, 31), _at(9, 8), _at(10, 1)])
+@pytest.mark.parametrize("now", [_at(8, 21), _at(9, 5, 30), _at(9, 8), _at(10, 1)])
 def test_planner_does_not_extend_or_precede_configured_window(now):
     manager = _manager()
 
@@ -66,10 +65,10 @@ def test_planner_does_not_extend_or_precede_configured_window(now):
     assert manager.in_overnight_extension(now) is False
 
 
-def test_legacy_whole_day_window_ends_at_midnight():
+def test_default_window_uses_its_configured_exclusive_finish():
     manager = _manager(config_entry=SimpleNamespace(data={}))
 
-    assert manager.window_end(_at(8, 10)) == _at(9, 0)
+    assert manager.window_end(_at(8, 10)) == _at(8, 23, 59)
     assert manager.window_end(_at(9, 1)) is None
 
 
@@ -83,7 +82,7 @@ def test_completion_survives_midnight_within_same_weekly_run(monkeypatch):
     controller.weekly_full_charge_complete = True
 
     monkeypatch.setattr(weekly_module.dt_util, "now", lambda: _at(9, 2))
-    assert manager.is_active() is False
+    assert manager.is_active() is True
     assert controller.weekly_full_charge_complete is True
     assert controller._weekly_active_cycle_date == date(2026, 11, 8)
 

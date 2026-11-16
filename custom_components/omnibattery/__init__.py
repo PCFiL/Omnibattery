@@ -1311,13 +1311,14 @@ class ChargeDischargeController:
         self._tempo_plan = None
         self._tempo_last_active = False
         self._full_charge_owner: str | None = None
+        self._weekly_grid_active = False
         self._tempo_original_cutoffs: dict[str, int] = {}
         self._tempo_cutoff_applied: set[str] = set()
 
         # Weekly Full Charge state
         self.weekly_full_charge_enabled = config_entry.data.get(CONF_ENABLE_WEEKLY_FULL_CHARGE, False)
         self.weekly_full_charge_day = config_entry.data.get(CONF_WEEKLY_FULL_CHARGE_DAY, "sun")
-        self.weekly_full_charge_complete = False  # True when the weekly charge to 100% has completed
+        self.weekly_full_charge_complete = False  # Full milestone reached; scheduled maintenance still owns the window
         self.last_checked_weekday = None  # Track day transitions for reset logic
         self.weekly_full_charge_registers_written = False  # True when register 44000 set to 100%
         self._weekly_charge_needs_restore = False  # True when day changed mid-charge and hardware restore is pending
@@ -3254,7 +3255,7 @@ class ChargeDischargeController:
                          f"day changed from {self.weekly_full_charge_day.upper()} to {new_weekly_day.upper()}"
                          if day_changed else "feature disabled")
             # If registers were written for a charge still in progress, schedule a hardware restore
-            if self.weekly_full_charge_registers_written and not self.weekly_full_charge_complete:
+            if self.weekly_full_charge_registers_written or self._weekly_charge_saved_max_soc:
                 _LOGGER.info("Weekly Full Charge: Mid-charge abort detected - hardware restore pending")
                 self._weekly_charge_needs_restore = True
             self.weekly_full_charge_complete = False
@@ -3775,6 +3776,7 @@ class ChargeDischargeController:
             "curtailment_negative_window",
             "weekly_refill_hold",
             "weekly_full_hold",
+            "weekly_schedule",
         }
         global_blockers = self._global_discharge_blockers
         if ignore_economic:
@@ -3953,12 +3955,20 @@ class ChargeDischargeController:
 
     def _refresh_time_slot_blocks(self) -> None:
         """Update per-battery charge/discharge blockers from the configured slots."""
+        weekly_permission = (
+            self._weekly_charge_mgr.is_active()
+            and self._weekly_full_charge_unlocked()
+        )
         for coordinator in self.coordinators:
             if ChargeDischargeController._is_battery_manual_owned(coordinator):
                 self.remove_charge_block("time_slot_charge", coordinator=coordinator)
                 self.remove_discharge_block("time_slot_discharge", coordinator=coordinator)
                 continue
-            if self._is_time_slot_allowed(coordinator, True):
+            # The weekly window is an explicit charge permission in its own
+            # right. A separate automatic 04:00-06:00 whitelist must not defer
+            # a scheduled Sunday 22:30 start. Manual slots retain ownership in
+            # the writer and dispatcher; user disable and safety blocks remain.
+            if weekly_permission or self._is_time_slot_allowed(coordinator, True):
                 self.remove_charge_block("time_slot_charge", coordinator=coordinator)
             else:
                 self.set_charge_block(
@@ -4147,6 +4157,58 @@ class ChargeDischargeController:
         await self._handle_predictive_grid_charging()
         return True
 
+    async def _handle_weekly_grid_charge(self) -> bool:
+        """Own the whole weekly window, independently of forecast/price slots.
+
+        Phase PD remains its batteries' sole writer. A non-phase fleet uses
+        the existing guarded grid regulator with an explicit 100% target.
+        Reaching full retains ownership until the scheduled end; per-battery
+        maintenance blockers implement the configured SOC hysteresis.
+        """
+        if not self._weekly_charge_mgr.is_active() or not self._weekly_full_charge_unlocked():
+            if getattr(self, "_weekly_grid_active", False):
+                # End/disable must stop a residual fleet charge before normal
+                # PD can return early on an unchanged meter. Retry an uncertain
+                # zero; phase-owned batteries have their own release protocol.
+                confirmed = True
+                runtime = getattr(self, "_phase_runtime", None)
+                phase_names = runtime.active_batteries if runtime is not None else set()
+                for coordinator in self.coordinators:
+                    if (
+                        coordinator.name in phase_names
+                        or self._weekly_charge_mgr._other_owner(coordinator)
+                        or coordinator.rs485_user_disabled
+                    ):
+                        continue
+                    stopped = await self._set_battery_power(
+                        coordinator, 0, 0, force_write=True,
+                    )
+                    confirmed = bool(stopped) and confirmed
+                if confirmed:
+                    self._weekly_grid_active = False
+                    self.previous_power = 0
+                    self.first_execution = True
+                    self._active_charge_batteries = []
+                    self._active_discharge_batteries = []
+                return True
+            return False
+        self._weekly_grid_active = True
+        self.grid_charging_active = True
+        self._current_price_slot_active = False
+        self._realtime_price_charging = False
+        self._predictive_charge_target_soc = {
+            c: 100.0 for c in self.coordinators
+            if c.data is not None and not self._is_battery_manual_owned(c)
+        }
+        await self._stop_blocked_active_batteries()
+        runtime = getattr(self, "_phase_runtime", None)
+        if runtime is not None and runtime.active_batteries:
+            # Do not add unreserved fleet charging alongside phase commands.
+            # PhaseRuntime arbitrates the shared import budget for its channels.
+            return True
+        await self._handle_predictive_grid_charging()
+        return True
+
     def _sync_full_charge_handoff(self) -> None:
         """Discard a lower-priority plan when a full-charge owner changes.
 
@@ -4225,7 +4287,7 @@ class ChargeDischargeController:
         self._predictive_safety_margin_stored = value
 
     def _weekly_full_charge_pending(self) -> bool:
-        """Return True while a weekly full charge still has to reach 100% today."""
+        """Return True while the weekly charge/maintenance window owns its target."""
         manager = getattr(self, "_weekly_charge_mgr", None)
         return manager is not None and manager.is_active()
 
@@ -4326,6 +4388,8 @@ class ChargeDischargeController:
 
         for coordinator in self.coordinators:
             self._predictive_solar_only_batteries.pop(coordinator.name, None)
+            self.remove_charge_block("weekly_maintenance", coordinator=coordinator)
+            self.remove_charge_block("weekly_cutoff_pending", coordinator=coordinator)
             if ChargeDischargeController._is_battery_manual_owned(coordinator):
                 self.remove_charge_block("max_soc", coordinator=coordinator)
                 self.remove_charge_block("charge_hysteresis", coordinator=coordinator)
@@ -4365,6 +4429,29 @@ class ChargeDischargeController:
             self.remove_charge_block("bms_cutoff_retry", coordinator=coordinator)
 
             if weekly_100_unlocked:
+                charge_requested = getattr(self._weekly_charge_mgr, "charge_requested", None)
+                if (
+                    not getattr(self, "_tempo_charge_active", False)
+                    and callable(charge_requested)
+                    and not self._weekly_charge_mgr._other_owner(coordinator)
+                    and not charge_requested(coordinator)
+                ):
+                    self.remove_charge_block("max_soc", coordinator=coordinator)
+                    self.remove_charge_block("charge_hysteresis", coordinator=coordinator)
+                    cutoff_pending = (
+                        coordinator.capabilities.hardware_soc_cutoff
+                        and coordinator.name not in getattr(self._weekly_charge_mgr, "_cutoff_applied_names", set())
+                    )
+                    self.set_charge_block(
+                        "weekly_cutoff_pending" if cutoff_pending else "weekly_maintenance",
+                        "hardware_soc_cutoff_unconfirmed" if cutoff_pending else "weekly_full",
+                        {"battery": coordinator.name, "soc": current_soc,
+                         "target_soc": 100,
+                         "hysteresis_percent": coordinator.charge_hysteresis_percent
+                         if coordinator.enable_charge_hysteresis else 0},
+                        coordinator=coordinator,
+                    )
+                    continue
                 if coordinator.enable_charge_hysteresis and coordinator._hysteresis_active:
                     _LOGGER.debug("%s: Overriding hysteresis for weekly full charge", coordinator.name)
                 coordinator._hysteresis_active = False
@@ -4764,6 +4851,19 @@ class ChargeDischargeController:
         self._refresh_battery_charge_limit_blocks()
         self._refresh_battery_discharge_limit_blocks()
         self._refresh_price_reserve_blocks()
+        weekly_hold = (
+            self._weekly_charge_mgr.is_active()
+            and self._weekly_full_charge_unlocked()
+        )
+        for coordinator in self.coordinators:
+            if weekly_hold and not self._weekly_charge_mgr._other_owner(coordinator):
+                self.set_discharge_block(
+                    "weekly_schedule", "weekly_full",
+                    {"battery": coordinator.name, "target_soc": 100},
+                    coordinator=coordinator,
+                )
+            else:
+                self.remove_discharge_block("weekly_schedule", coordinator=coordinator)
         # Last: the deliberate-export setpoint guards on the blocker registry
         # every line above has just rebuilt, so it must read it complete.
         self._high_price_discharge_mgr.refresh_override()
@@ -4975,6 +5075,14 @@ class ChargeDischargeController:
             if is_charging:
                 # Check if weekly full charge is active AND 100% is actually unlocked
                 weekly_100_unlocked = self._weekly_full_charge_unlocked()
+                charge_requested = getattr(self._weekly_charge_mgr, "charge_requested", None)
+                if (
+                    weekly_100_unlocked
+                    and not getattr(self, "_tempo_charge_active", False)
+                    and callable(charge_requested)
+                    and not charge_requested(coordinator)
+                ):
+                    continue
 
                 # Determine effective max SOC (respects slot/predictive overrides)
                 effective_max_soc, max_soc_source = self._effective_charge_max_soc(
@@ -7045,6 +7153,7 @@ class ChargeDischargeController:
                         "price_discharge",
                         "price_reserve",
                         "curtailment_negative_window",
+                        "weekly_schedule",
                     },
                 )
             self._predictive_protection_command_w = allocated
@@ -7112,7 +7221,11 @@ class ChargeDischargeController:
         hands control to demand protection.
         """
         from .control.edf_tempo import is_tempo_offpeak
-        if not is_tempo_offpeak(dt_util.now()):
+        weekly_permission = (
+            self._weekly_charge_mgr.is_active()
+            and self._weekly_full_charge_unlocked()
+        )
+        if not is_tempo_offpeak(dt_util.now()) and not weekly_permission:
             # Hard HC gate for Time Slot, Dynamic Pricing and Real-Time Price.
             # PhaseRuntime separately releases its owned battery setpoints.
             self.grid_charging_active = False
@@ -7180,7 +7293,7 @@ class ChargeDischargeController:
         # evaluated.  This prevents a battery that already reached its
         # opportunistic target from receiving even the first control-cycle
         # command while another battery still needs charge.
-        if getattr(self, "_tempo_charge_active", False):
+        if getattr(self, "_tempo_charge_active", False) or weekly_permission:
             # Mandatory 100% deadline, independent of forecast deficit.
             self._predictive_charge_target_soc = {
                 c: 100.0 for c in self.coordinators
@@ -7298,7 +7411,8 @@ class ChargeDischargeController:
         error = target_power - sensor_filtered  # INVERTED: target - sensor
         
         # PD Control with modified target
-        if not self._grid_charging_initialized:
+        initializing_charge = not self._grid_charging_initialized
+        if initializing_charge:
             # Initialize for grid charging mode (first time entering). A
             # legitimate return from hard protection may provide a calculated
             # resume power; only a fresh slot with no such context starts at
@@ -7393,7 +7507,10 @@ class ChargeDischargeController:
         # it is independent fresh evidence for hard-limit confirmation. While a
         # confirmation streak is active, re-assert the current positive charge
         # command; otherwise keep the existing no-op behavior for repeated values.
-        if not has_new_control_sample and sensor_within_stale_tolerance:
+        # A new owner or a hysteresis top-up has no live charge command yet.
+        # Dispatch its initialized setpoint even when the fresh meter value
+        # is identical; repeated values still must not integrate P/D again.
+        if not initializing_charge and not has_new_control_sample and sensor_within_stale_tolerance:
             if getattr(self, "_predictive_hard_limit_samples", 0) == 0:
                 _LOGGER.debug(
                     "Predictive charging: meter publication has no new transformed "
@@ -8579,16 +8696,16 @@ class ChargeDischargeController:
             if ChargeDischargeController._is_battery_manual_owned(coordinator):
                 continue
             if self.is_charge_blocked(coordinator):
-                await self._set_battery_power(coordinator, 0, 0)
-                if coordinator in self._active_charge_batteries:
+                confirmed = await self._set_battery_power(coordinator, 0, 0)
+                if confirmed and coordinator in self._active_charge_batteries:
                     self._active_charge_batteries.remove(coordinator)
                 stopped = True
         for coordinator in list(self._active_discharge_batteries):
             if ChargeDischargeController._is_battery_manual_owned(coordinator):
                 continue
             if self.is_discharge_blocked(coordinator):
-                await self._set_battery_power(coordinator, 0, 0)
-                if coordinator in self._active_discharge_batteries:
+                confirmed = await self._set_battery_power(coordinator, 0, 0)
+                if confirmed and coordinator in self._active_discharge_batteries:
                     self._active_discharge_batteries.remove(coordinator)
                 stopped = True
         return stopped
@@ -10401,6 +10518,12 @@ class ChargeDischargeController:
         # Tempo gets first opportunity during 22:00–06:00 before a red day.
         # The existing predictive handler owns actual per-phase dispatch.
         if await self._handle_tempo_grid_charge():
+            return
+
+        # The explicit weekly schedule starts at its own configured boundary,
+        # even when predictive charging is disabled, outside its slots or has
+        # decided to wait for tomorrow's solar production.
+        if await self._handle_weekly_grid_charge():
             return
 
         # === Predictive Grid Charging Logic (mode dispatch) ===

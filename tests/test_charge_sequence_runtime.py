@@ -71,6 +71,17 @@ def _assert_positive_commands(night):
 ])
 async def test_competing_requests_obey_charge_owner_priority(night, tempo, weekly, recovery, owner):
     _requests(night, tempo=tempo, weekly=weekly, recovery=recovery)
+    if weekly:
+        for battery in night.batteries:
+            battery.set_charge_cutoff = AsyncMock(return_value=True)
+        # Weekly authorization includes the real manager's hardware ACKs,
+        # which precede phase dispatch in the production control cycle.
+        await night.controller._weekly_charge_mgr.handle_registers()
+        for battery in night.batteries:
+            battery.set_charge_cutoff.assert_awaited_once_with(100)
+        assert night.controller._weekly_charge_mgr._cutoff_applied_names == {
+            battery.name for battery in night.batteries
+        }
 
     await _step(night)  # Initial hardware standby acknowledgement.
     await _step(night)

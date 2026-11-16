@@ -236,7 +236,7 @@ def _solar_for_slice(periods, start, end, tracker):
 
 
 def _forecast_boundaries(start, end, entry):
-    """Preserve weekly HH:MM edges; a 05:10 inclusive end means 05:11 stop."""
+    """Preserve the exact weekly start and exclusive finish in the timeline."""
     from ..control.weekly_charge_window import parse_clock
     edges = {utc(start), utc(end)}
     for a, b in boundaries(start, end):
@@ -247,7 +247,7 @@ def _forecast_boundaries(start, end, entry):
     last = parse_clock(entry.data.get("weekly_full_charge_end", "23:59"))
     while day <= last_day:
         for point in (datetime.combine(day, first, PARIS),
-                      datetime.combine(day, last, PARIS) + timedelta(minutes=1)):
+                      datetime.combine(day, last, PARIS)):
             if utc(start) < utc(point) < utc(end):
                 edges.add(utc(point))
         day += timedelta(days=1)
@@ -268,8 +268,9 @@ def _weekly_allowed(controller, entry, at):
         end=entry.data.get("weekly_full_charge_end", "23:59"), weekday=day)
     if cycle is None:
         return False
-    return not (getattr(controller, "weekly_full_charge_complete", False)
-                and getattr(controller, "_weekly_active_cycle_date", None) == cycle)
+    # Reaching full SOC starts maintenance; the configured window still owns
+    # the battery until its finish, including after midnight or a reload.
+    return True
 
 
 def _reason(hass, entry, controller, now, window):

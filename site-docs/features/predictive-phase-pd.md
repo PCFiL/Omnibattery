@@ -6,7 +6,10 @@ solar/consumption predictive engine can now pass its calculated **per-battery
 SOC targets** to each phase owner.
 
 - **Tempo red night**: mandatory 100% charge still takes priority.
-- **Weekly full charge**: mandatory 100% charge takes second priority.
+- **Weekly full charge**: the configured window takes second priority, starts
+  charging at its opening and maintains full SOC until its exclusive finish,
+  using each battery's configured charge hysteresis. It grants its own charge
+  permission independently of ordinary automatic or predictive time slots.
 - **Low-SOC recovery**: if explicitly enabled for a phase, its configured
   recovery target is served before ordinary predictive charging. Reaching
   that target releases the recovery request; a higher predictive target can

@@ -381,6 +381,15 @@ async def test_weekly_end_rebuilds_predictive_target_with_unchanged_soc(night):
         "weekly_full_charge_start": "22:05",
         "weekly_full_charge_end": "22:10",
     })
+    for battery in night.batteries:
+        battery.set_charge_cutoff = AsyncMock(return_value=True)
+    # The production cycle confirms hardware cutoffs before switching owners.
+    await ctl._weekly_charge_mgr.handle_registers()
+    for battery in night.batteries:
+        battery.set_charge_cutoff.assert_awaited_once_with(100)
+    assert ctl._weekly_charge_mgr._cutoff_applied_names == {
+        battery.name for battery in night.batteries
+    }
     ctl._sync_full_charge_handoff()
     assert ctl._full_charge_owner == "weekly"
     assert ctl._predictive_charge_target_soc is None
@@ -391,6 +400,10 @@ async def test_weekly_end_rebuilds_predictive_target_with_unchanged_soc(night):
     )
 
     night.freezer.move_to("2026-11-13T21:11:00+00:00")
+    await ctl._weekly_charge_mgr.handle_registers()
+    for battery in night.batteries:
+        assert battery.set_charge_cutoff.await_args.args == (90,)
+    assert not ctl._weekly_charge_mgr._cutoff_applied_names
     ctl._sync_full_charge_handoff()
     assert ctl._full_charge_owner is None
     assert ctl.last_evaluation_soc is None

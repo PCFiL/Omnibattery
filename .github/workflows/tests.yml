@@ -96,6 +96,11 @@ jobs:
                 tests/test_time_slot_power_limits.py \
                 tests/test_charge_sequence_runtime.py \
                 tests/test_weekly_schedule_handoffs.py \
+                tests/test_weekly_scheduled_runtime.py \
+                tests/test_weekly_fleet_schedule.py \
+                tests/test_weekly_fleet_safety.py \
+                tests/test_weekly_full_charge_hold.py \
+                tests/test_weekly_charge_diagnostics.py \
                 tests/test_weekly_full_charge_lifecycle.py \
                 tests/test_weekly_charge_window.py \
                 tests/test_weekly_predictive_charge.py \

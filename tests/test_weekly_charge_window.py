@@ -9,19 +9,22 @@ from custom_components.omnibattery.control.weekly_charge_window import (
 )
 
 
-def test_legacy_defaults_cover_entire_selected_day():
-    for hour, minute in ((0, 0), (12, 30), (23, 59)):
+def test_defaults_use_the_same_exclusive_end_as_explicit_settings():
+    for hour, minute in ((0, 0), (12, 30), (23, 58)):
         assert in_window(
             datetime(2026, 11, 8, hour, minute),
             start=DEFAULT_WEEKLY_START,
             end=DEFAULT_WEEKLY_END,
         )
+    assert not in_window(datetime(2026, 11, 8, 23, 59),
+                         start=DEFAULT_WEEKLY_START, end=DEFAULT_WEEKLY_END)
 
 
-def test_start_and_end_minute_are_inclusive():
+def test_start_is_inclusive_and_finish_is_exclusive():
     assert not in_window(datetime(2026, 11, 8, 9, 59), start="10:00", end="16:00")
     assert in_window(datetime(2026, 11, 8, 10, 0), start="10:00", end="16:00")
-    assert in_window(datetime(2026, 11, 8, 16, 0), start="10:00", end="16:00")
+    assert in_window(datetime(2026, 11, 8, 15, 59, 59), start="10:00", end="16:00")
+    assert not in_window(datetime(2026, 11, 8, 16, 0), start="10:00", end="16:00")
     assert not in_window(datetime(2026, 11, 8, 16, 1), start="10:00", end="16:00")
 
 
@@ -49,8 +52,10 @@ def test_sunday_night_runs_until_monday_morning():
                      start="22:30", end="05:30", weekday=6)
     assert in_window(datetime(2026, 11, 9, 0, 0),
                      start="22:30", end="05:30", weekday=6)
-    assert in_window(datetime(2026, 11, 9, 5, 30),
+    assert in_window(datetime(2026, 11, 9, 5, 29, 59),
                      start="22:30", end="05:30", weekday=6)
+    assert not in_window(datetime(2026, 11, 9, 5, 30),
+                         start="22:30", end="05:30", weekday=6)
     assert not in_window(datetime(2026, 11, 9, 5, 31),
                          start="22:30", end="05:30", weekday=6)
     assert not in_window(datetime(2026, 11, 10, 3, 0),

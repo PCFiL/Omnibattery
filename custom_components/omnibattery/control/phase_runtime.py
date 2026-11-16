@@ -625,13 +625,16 @@ class PhaseRuntime:
                         )
                     continue
 
-                bms_full = bool(
-                    weekly_manager is not None
-                    and weekly_manager.is_battery_full(battery)
-                )
-                # is_battery_full handles coupled packs and BMS taper/retry;
-                # raw SOC=100 alone can be premature on multi-pack batteries.
-                if bms_full:
+                if forced_charge_mode == "weekly":
+                    # Weekly ownership lasts through the configured finish.
+                    # Its manager retains each battery's completed SOC and
+                    # recharge hysteresis, so holding full means standby here,
+                    # not returning the battery to ordinary PD discharge.
+                    if not weekly_manager.charge_requested(battery):
+                        max_charge = 0
+                elif weekly_manager is not None and weekly_manager.is_battery_full(battery):
+                    # This includes coupled packs and BMS taper/retry; raw
+                    # aggregate SOC=100 can precede the last pack filling.
                     max_charge = 0
                 request = phase_tempo_charge_request(
                     grid_power_w=float(selected.reading.power_w),

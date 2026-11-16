@@ -709,6 +709,136 @@ def _predictive_charging_info(controller, coordinators) -> dict[str, Any]:
     })
 
 
+def _weekly_full_charge_info(controller, coordinators, *, entry=None) -> dict[str, Any]:
+    """Compare the weekly schedule with the last dispatch, without advancing it.
+
+    ``active`` and ``unlocked`` describe the configured weekly request at the
+    current local time, not proof of charging. Blockers, phase verdicts and
+    commands describe the last control cycle. Never call ``is_active`` or
+    ``charge_requested`` here: they can expire a cycle or mutate its hysteresis.
+    """
+    if controller is None:
+        return {"status": "controller_unavailable"}
+
+    from homeassistant.util import dt as dt_util
+
+    from .const import (
+        CONF_ENABLE_WEEKLY_FULL_CHARGE,
+        CONF_WEEKLY_FULL_CHARGE_DAY,
+        DEFAULT_WEEKLY_FULL_CHARGE_SKIP_DELAY,
+        WEEKDAY_MAP,
+    )
+    from .control.weekly_charge_window import (
+        CONF_WEEKLY_END, CONF_WEEKLY_START,
+        DEFAULT_WEEKLY_END, DEFAULT_WEEKLY_START, active_cycle_date,
+    )
+
+    config_entry = getattr(controller, "config_entry", None) or entry
+    config = getattr(config_entry, "data", None) or {}
+    now = dt_util.now()  # Same Home Assistant local clock as the weekly manager.
+    configured_day = config.get(CONF_WEEKLY_FULL_CHARGE_DAY, "sun")
+    day = getattr(controller, "weekly_full_charge_day", configured_day)
+    start = config.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
+    end = config.get(CONF_WEEKLY_END, DEFAULT_WEEKLY_END)
+    cycle = None
+    schedule_error = None
+    try:
+        cycle = active_cycle_date(now, start=start, end=end, weekday=WEEKDAY_MAP[day])
+    except (KeyError, TypeError, ValueError) as exc:
+        schedule_error = str(exc)
+
+    enabled = bool(getattr(controller, "weekly_full_charge_enabled", False))
+    complete = bool(getattr(controller, "weekly_full_charge_complete", False))
+    forced = bool(getattr(controller, "_force_full_charge", False))
+    # A scheduled window maintains the full-charge target after first reaching
+    # it; an explicit one-shot force request retains its completion boundary.
+    active = enabled and (not complete if forced else cycle is not None)
+    delay_enabled = bool(getattr(controller, "charge_delay_enabled", False))
+    delay_unlocked = bool(getattr(controller, "_charge_delay_unlocked", False))
+    skip_delay = bool(getattr(
+        controller, "_weekly_full_charge_skip_delay", DEFAULT_WEEKLY_FULL_CHARGE_SKIP_DELAY
+    ))
+    blockers, reasons = _charge_blocker_info(controller)
+    manager = getattr(controller, "_weekly_charge_mgr", None)
+    hold_state = getattr(manager, "_hold_state", None) or {}
+    weekly_status = getattr(controller, "_weekly_charge_status", None) or {}
+    runtime = getattr(controller, "_phase_runtime", None)
+    phase_by_battery = {
+        channel.battery_key: channel.phase
+        for channel in getattr(runtime, "channels", ())
+        if channel.enabled
+    }
+    phase_status = getattr(runtime, "safety_status", None) or {}
+    phase_owners = getattr(runtime, "_last_grid_charge_owner", None) or {}
+    planner = getattr(getattr(runtime, "manager", None), "planner", None)
+    phase_states = getattr(planner, "states", None) or {}
+    batteries = {}
+    for coordinator in coordinators:
+        name = coordinator.name
+        phase = phase_by_battery.get(name)
+        telemetry = getattr(coordinator, "data", None) or {}
+        batteries[name] = {
+            "phase": phase,
+            "phase_status": phase_status.get(phase),
+            "charge_owner": phase_owners.get(phase),
+            "soc": _safe_number(telemetry.get("battery_soc")),
+            "max_soc": _safe_number(getattr(coordinator, "max_soc", None)),
+            "charge_hysteresis_percent": _safe_number(
+                getattr(coordinator, "charge_hysteresis_percent", None)
+            ),
+            "weekly_hold": hold_state.get(name),
+            "manual": bool(getattr(coordinator, "battery_manual_mode_enabled", False)),
+            "last_accepted_phase_command_w": _rounded_number(
+                getattr(phase_states.get(name), "last_command_w", None), 1
+            ),
+            "commanded_charge_power_w": _rounded_number(
+                getattr(coordinator, "commanded_charge_power", None), 1
+            ),
+            "ac_delivered_power_w": _rounded_number(telemetry.get("ac_delivered_power"), 1),
+            "charge_blockers": {
+                **blockers.get("global", {}),
+                **blockers.get("batteries", {}).get(name, {}),
+            },
+        }
+
+    return _json_safe({
+        "observed_at_local": now,
+        "timezone": str(now.tzinfo),
+        "configured_timezone": getattr(
+            getattr(getattr(controller, "hass", None), "config", None), "time_zone", None
+        ),
+        "enabled": enabled,
+        "configured_enabled": bool(config.get(CONF_ENABLE_WEEKLY_FULL_CHARGE, False)),
+        "configured_day": configured_day,
+        "day": day,
+        "start_local": start,
+        "end_local": end,
+        "active_window": cycle is not None,
+        "active_cycle_date": cycle,
+        "stored_cycle_date": getattr(controller, "_weekly_active_cycle_date", None),
+        "schedule_error": schedule_error,
+        "active": active,
+        "unlocked": active and (not delay_enabled or delay_unlocked or skip_delay),
+        "force_full_charge": forced,
+        "complete": complete,
+        "state": weekly_status.get("state"),
+        "status": weekly_status,
+        "registers_written": bool(getattr(controller, "weekly_full_charge_registers_written", False)),
+        "restore_pending": bool(getattr(controller, "_weekly_charge_needs_restore", False)),
+        "last_full_charge_owner": getattr(controller, "_full_charge_owner", None),
+        "skip_delay": skip_delay,
+        "charge_delay": {
+            "enabled": delay_enabled, "unlocked": delay_unlocked,
+            "status": getattr(controller, "_charge_delay_status", None),
+        },
+        "global_manual": bool(getattr(controller, "manual_mode_enabled", False)),
+        "ev_pause": bool(getattr(controller, "ev_charging_pause_enabled", False)),
+        "charge_blockers": blockers,
+        "charge_block_reasons": reasons,
+        "batteries": batteries,
+    })
+
+
 def _timeline_int(value: object) -> int | None:
     """Return a finite non-negative integer for timeline counters."""
     try:
@@ -1083,6 +1213,9 @@ async def async_get_config_entry_diagnostics(
         "dynamic_pricing": _dynamic_pricing_info(controller),
         "predictive_charging": async_redact_data(
             _predictive_charging_info(controller, coordinators), TO_REDACT
+        ),
+        "weekly_full_charge": async_redact_data(
+            _weekly_full_charge_info(controller, coordinators, entry=entry), TO_REDACT
         ),
         "daily_operation_timeline": _daily_operation_timeline_summary(controller),
         "consumption_profile": consumption_profile,

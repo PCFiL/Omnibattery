@@ -89,7 +89,9 @@ async def test_weekly_full_charge_commands_grid_import_via_phase_owner():
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: True
     ctl.consumption_sensor = "sensor.grid"
     ctl._apply_meter_transform = lambda state: float(state.state)
@@ -112,7 +114,9 @@ async def test_weekly_inactive_returns_to_normal_phase_pd():
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: False
     runtime = PhaseRuntime(ctl)
     await runtime.run()
@@ -128,7 +132,9 @@ async def test_weekly_grid_charge_respects_per_phase_import_ceiling():
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: True
     ctl.consumption_sensor = "sensor.grid"
     ctl._apply_meter_transform = lambda state: float(state.state)
@@ -147,7 +153,9 @@ async def test_weekly_charge_stops_prior_discharge_before_charging(freezer):
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: True
     ctl.consumption_sensor = "sensor.grid"
     ctl._apply_meter_transform = lambda state: float(state.state)
@@ -174,7 +182,9 @@ async def test_weekly_preserves_discharge_when_release_would_overload_grid():
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = True
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: True
     ctl.consumption_sensor = "sensor.grid"
     ctl._apply_meter_transform = lambda state: float(state.state)
@@ -204,7 +214,9 @@ def _enable_phase_predictive(ctl, target=65.0):
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl.weekly_full_charge_enabled = False
     ctl._tempo_charge_active = False
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl._weekly_full_charge_unlocked = lambda: False
     ctl.predictive_charging_enabled = True
     ctl.predictive_charging_overridden = False

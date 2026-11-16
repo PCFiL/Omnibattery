@@ -238,7 +238,7 @@ def test_uncertain_discharge_stop_reserves_import_headroom(env):
 def test_weekly_full_charge_priority_preserved(env):
     ctl,runtime,clock=env
     ctl.weekly_full_charge_enabled=True
-    ctl._weekly_charge_mgr=NS(is_battery_full=lambda b:False)
+    ctl._weekly_charge_mgr=NS(is_battery_full=lambda b:False, charge_requested=lambda b:True)
     assert len([c for c in run(env) if c[1]>0])==3
     assert set(runtime._last_grid_charge_owner.values())=={"weekly"}
 

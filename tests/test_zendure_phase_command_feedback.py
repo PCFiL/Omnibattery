@@ -127,8 +127,29 @@ async def zendure_night(night):
 async def test_accepted_but_undelivered_charge_is_reasserted(zendure_night, mode):
     state = zendure_night
     if mode == "weekly":
-        state.controller.weekly_full_charge_enabled = True
-        state.controller._weekly_full_charge_unlocked = lambda: True
+        ctl = state.controller
+        ctl.config_entry.data.update({
+            "enable_weekly_full_charge": True,
+            "weekly_full_charge_day": "fri",
+            "weekly_full_charge_start": "22:00",
+            "weekly_full_charge_end": "06:00",
+            "enable_charge_delay": False,
+        })
+        ctl.weekly_full_charge_enabled = True
+        ctl.weekly_full_charge_day = "fri"
+        ctl.charge_delay_enabled = False
+        # Use the real scheduled owner and confirm each hardware 100% cutoff
+        # before phase dispatch. A forced "unlocked" lambda bypassed both the
+        # configured weekday and the manager's maintenance/ACK contract.
+        for battery in state.batteries:
+            snapshot = await battery.driver.read_telemetry()
+            battery.data = {**snapshot, "battery_total_energy": 10.0}
+            battery._key_update_times = {key: dt_util.utcnow() for key in snapshot}
+        await ctl._weekly_charge_mgr.handle_registers()
+        assert ctl._weekly_charge_mgr.is_active()
+        assert ctl._weekly_charge_mgr._cutoff_applied_names == {
+            battery.name for battery in state.batteries
+        }
     state.controller._tempo_charge_active = mode == "tempo"
     for _ in range(9):
         await state.tick()

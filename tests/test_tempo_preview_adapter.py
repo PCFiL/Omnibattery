@@ -156,21 +156,23 @@ def test_unknown_or_conflicting_tempo_never_invents_red(env,warning,color):
     assert build(env)["next_window"]["reason"] == "predictive"
 
 
-def test_weekly_exact_minutes_and_inclusive_end(env):
+def test_weekly_exact_minutes_and_exclusive_end(env):
     env.ctl.weekly_full_charge_enabled = True
     env.entry.data.update(weekly_full_charge_start="22:10", weekly_full_charge_end="22:20")
     nxt = build(env)["next_window"]
     assert nxt["reason"] == "weekly_full"
-    # 11 minutes, not a rounded 15-minute bin; 3 batteries x 2.5 kW cap x eta.
-    assert nxt["planned_battery_kwh"] <= 7.5 * 11/60 * adapter.CHARGE_EFFICIENCY + .002
+    # Ten exact minutes, not an extra minute or a rounded 15-minute bin.
+    assert nxt["planned_battery_kwh"] <= 7.5 * 10/60 * adapter.CHARGE_EFFICIENCY + .002
 
 
-def test_completed_current_weekly_cycle_does_not_start_again(env):
+def test_completed_current_weekly_cycle_keeps_full_charge_window_owner(env):
     env.ctl.weekly_full_charge_enabled = True
     env.ctl.weekly_full_charge_complete = True
     env.ctl._weekly_active_cycle_date = at().date()
     env.entry.data.update(weekly_full_charge_start="22:00", weekly_full_charge_end="06:00")
-    assert build(env, now=at(hour=23))["current_window"]["reason"] == "predictive"
+    current = build(env, now=at(hour=23))["current_window"]
+    assert current["reason"] == "weekly_full"
+    assert all(row["soc_target"] == 100 for row in current["rows"])
 
 
 def test_manual_is_excluded_not_zero(env):

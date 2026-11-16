@@ -1,8 +1,8 @@
 """Local weekly full-charge windows, including overnight time ranges.
 
 Weekday refers to the day on which the scheduled charge STARTS.
-A Sunday 22:30–05:30 window covers Sunday 22:30 through Monday 05:30.
-The end minute is included for backward compatibility.
+A Sunday 22:30–06:00 window covers Sunday 22:30 until Monday 06:00.
+The start is inclusive and the end is exclusive.
 """
 from __future__ import annotations
 
@@ -61,14 +61,14 @@ def in_window(now: datetime, *, start: str, end: str,
     begin = first.hour * 60 + first.minute
     finish = last.hour * 60 + last.minute
     if weekday is None:
-        return begin <= current <= finish if begin < finish else (
-            current >= begin or current <= finish
+        return begin <= current < finish if begin < finish else (
+            current >= begin or current < finish
         )
     if begin < finish:
-        return now.weekday() == weekday and begin <= current <= finish
+        return now.weekday() == weekday and begin <= current < finish
     return (
         (now.weekday() == weekday and current >= begin)
-        or (now.weekday() == (weekday + 1) % 7 and current <= finish)
+        or (now.weekday() == (weekday + 1) % 7 and current < finish)
     )
 
 
@@ -81,6 +81,6 @@ def active_cycle_date(now: datetime, *, start: str, end: str, weekday: int):
     current = now.hour * 60 + now.minute
     first_m = first.hour * 60 + first.minute
     end_m = last.hour * 60 + last.minute
-    if first_m > end_m and current <= end_m:
+    if first_m > end_m and current < end_m:
         return (now - timedelta(days=1)).date()
     return now.date()

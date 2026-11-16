@@ -5,7 +5,8 @@ Owns:
 - Persistence of completion / registers-written across HA restarts
 - Hardware register (44000) writes to allow charging to 100% on v2 batteries
 - Completion detection (top-voltage measurement, 100% SOC, or BMS cutoff at 99%)
-- Register restore and hysteresis re-enable on completion
+- Independent per-battery full-charge maintenance until the scheduled end
+- Register restore when the scheduled window ends or is interrupted
 - Mid-charge abort handling when day or feature flag changes
 
 Weekly uses the same 100% top-voltage taper/measurement flow as a user-selected
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
+from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -82,6 +84,11 @@ class WeeklyFullChargeManager:
         # Edge-trigger guard so the "already completed" debug line logs once per
         # completion, not once per is_active() call (called per-battery per-cycle).
         self._already_complete_logged = False
+        # Reaching full ends that battery's initial charge, not the scheduled
+        # owner. The separate latch keeps its 100% target through the window
+        # without cycling charge on every 1% drop or borrowing normal max-SOC
+        # hysteresis state (the configured ceiling may only be 90%).
+        self._hold_state: dict[str, dict[str, float | bool]] = {}
 
     def _create_background_task(self, coroutine, name: str) -> asyncio.Task | None:
         """Create persistence work through the owning entry controller."""
@@ -331,6 +338,88 @@ class WeeklyFullChargeManager:
         """Return only the debounced BMS-cutoff state, independent of SOC."""
         return self._bms_cutoff_counts.get(coordinator.name, 0) >= _BMS_CUTOFF_REQUIRED_CYCLES
 
+    def _set_hold_state(self, name: str, soc_at_full: float, recharging: bool) -> None:
+        """Persist only a genuine full/maintenance transition."""
+        state = self.__dict__.setdefault("_hold_state", {})
+        updated = {"soc_at_full": soc_at_full, "recharging": recharging}
+        if state.get(name) == updated:
+            return
+        state[name] = updated
+        self._create_background_task(
+            self.save_state(), "omnibattery_weekly_charge_hold_save"
+        )
+
+    def charge_requested(self, coordinator: Any) -> bool:
+        """Whether this scheduled owner currently requests charge for a battery.
+
+        A battery reaching its genuine pack/BMS full condition holds there
+        independently of the rest of the fleet. It only starts a new charge
+        below its reached SOC minus the configured hysteresis, then continues
+        until full again. No command or hardware setting is written here.
+        """
+        if (not self.is_active() or self._other_owner(coordinator)
+                or not getattr(coordinator, "is_available", True)
+                or not coordinator.data):
+            return False
+        if (coordinator.capabilities.hardware_soc_cutoff
+                and coordinator.name not in getattr(self, "_cutoff_applied_names", set())):
+            # A failed register write cannot authorize a software target of
+            # 100% against a lower hardware limit. handle_registers retries
+            # this battery while confirmed/software-only peers can charge.
+            return False
+        try:
+            soc = float(coordinator.data.get("battery_soc"))
+        except (TypeError, ValueError):
+            return False
+        if not isfinite(soc) or not 0 <= soc <= 100:
+            return False
+        holds = self.__dict__.setdefault("_hold_state", {})
+        hold = holds.get(coordinator.name)
+        if hold is not None and not hold["recharging"]:
+            try:
+                hysteresis = float(getattr(coordinator, "charge_hysteresis_percent", 0) or 0)
+            except (TypeError, ValueError):
+                hysteresis = 0.0
+            if not getattr(coordinator, "enable_charge_hysteresis", False):
+                hysteresis = 0.0
+            threshold = float(hold["soc_at_full"]) - max(0.0, hysteresis)
+            if soc >= threshold:
+                return False
+            # The confirmation belonged to the previous full-charge episode.
+            # Re-arm once at the threshold crossing; any NEW debounced BMS
+            # refusal while recharging remains authoritative below.
+            self.reset_bms_cutoff_confirmation(coordinator)
+            self.__dict__.get("_bms_cutoff_first_at", {}).pop(coordinator.name, None)
+            self._set_hold_state(coordinator.name, float(hold["soc_at_full"]), True)
+        if self.is_battery_full(coordinator):
+            self._set_hold_state(coordinator.name, soc, False)
+            return False
+        return True
+
+    def _end_cycle(self) -> None:
+        """Release maintenance and retain hardware cleanup across restarts."""
+        ctrl = self._controller
+        holds = self.__dict__.setdefault("_hold_state", {})
+        changed = bool(
+            getattr(ctrl, "_weekly_active_cycle_date", None)
+            or ctrl.weekly_full_charge_complete
+            or ctrl.weekly_full_charge_registers_written
+            or holds
+        )
+        if (ctrl.weekly_full_charge_registers_written
+                or getattr(ctrl, "_weekly_charge_saved_max_soc", {})):
+            ctrl._weekly_charge_needs_restore = True
+        ctrl._weekly_active_cycle_date = None
+        ctrl.weekly_full_charge_complete = False
+        ctrl.weekly_full_charge_registers_written = False
+        holds.clear()
+        ctrl._weekly_charge_status["state"] = "Idle"
+        ctrl._weekly_charge_status.pop("completion_reason", None)
+        if changed:
+            self._create_background_task(
+                self.save_state(), "omnibattery_weekly_charge_state_save"
+            )
+
     def _sunrise_on(self, day: date) -> datetime | None:
         """Local sunrise on ``day`` (naive), or None when it cannot be told."""
         tracker = getattr(self._controller, "_consumption_tracker", None)
@@ -350,7 +439,7 @@ class WeeklyFullChargeManager:
 
         The predictive planner must use the same deadline as ``is_active``.
         A sunrise deadline could otherwise reserve charging after a configured
-        05:30 finish. The end minute remains included, as in ``in_window``.
+        05:30 finish. The configured finish is exclusive, as in ``in_window``.
         """
         ctrl = self._controller
         start = ctrl.config_entry.data.get(CONF_WEEKLY_START, DEFAULT_WEEKLY_START)
@@ -363,7 +452,7 @@ class WeeklyFullChargeManager:
             return None
         first, last = parse_clock(start), parse_clock(end)
         end_day = cycle + timedelta(days=1) if first > last else cycle
-        return datetime.combine(end_day, last, tzinfo=now.tzinfo) + timedelta(minutes=1)
+        return datetime.combine(end_day, last, tzinfo=now.tzinfo)
 
     def in_overnight_extension(self, now: datetime) -> bool:
         """True after midnight while the preceding day's configured run continues."""
@@ -382,12 +471,14 @@ class WeeklyFullChargeManager:
         Returns True if:
         - Feature is enabled
         - It is within the configured window, including its overnight portion
-        - NOT all batteries have reached 100% yet
+        Reaching full does not release a scheduled window: each battery then
+        maintains its achieved SOC with its own hysteresis until the finish.
 
         Also handles the end of that window to reset the flags.
         """
         ctrl = self._controller
         if not ctrl.weekly_full_charge_enabled:
+            self._end_cycle()
             return False
 
         # Re-arm the "already completed" edge-trigger log whenever completion clears
@@ -421,43 +512,30 @@ class WeeklyFullChargeManager:
         # mark the actual anchor date to ensure completion survives a reload.
         last_cycle = getattr(ctrl, "_weekly_active_cycle_date", None)
         if active_date is None:
-            if last_cycle is not None or ctrl.weekly_full_charge_complete:
-                ctrl._weekly_active_cycle_date = None
-                if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
-                    ctrl._weekly_charge_needs_restore = True
-                ctrl.weekly_full_charge_complete = False
-                ctrl.weekly_full_charge_registers_written = False
-                ctrl._weekly_charge_status["state"] = "Idle"
-                ctrl._weekly_charge_status.pop("completion_reason", None)
-                self._create_background_task(
-                    self.save_state(), "omnibattery_weekly_charge_state_save"
-                )
+            self._end_cycle()
             return False
 
         if last_cycle is not None and last_cycle != active_date:
-            if ctrl.weekly_full_charge_registers_written and not ctrl.weekly_full_charge_complete:
-                ctrl._weekly_charge_needs_restore = True
-            ctrl.weekly_full_charge_complete = False
-            ctrl.weekly_full_charge_registers_written = False
+            self._end_cycle()
             self._already_complete_logged = False
         ctrl._weekly_active_cycle_date = active_date
 
         if ctrl.weekly_full_charge_complete:
             if not self._already_complete_logged:
-                _LOGGER.debug("Weekly Full Charge: On target day but already completed - using normal max_soc")
+                _LOGGER.debug("Weekly Full Charge: full charge reached; maintaining until the scheduled finish")
                 self._already_complete_logged = True
-            return False
 
-        # Active: on target day and not yet complete
+        # The scheduled owner remains active through maintenance and top-ups.
         return True
 
     async def load_state(self) -> None:
         """Load persisted weekly charge state from storage.
 
         This ensures that if Home Assistant is reloaded after the weekly charge
-        completes, the system remembers not to restart the charging process.
+        reaches full, its per-battery maintenance hysteresis is not lost.
         """
         ctrl = self._controller
+        self._hold_state = {}
 
         try:
             data = await self._store.async_load()
@@ -480,6 +558,7 @@ class WeeklyFullChargeManager:
                 ctrl.weekly_full_charge_registers_written = bool(data.get("registers_written", False))
                 ctrl._weekly_charge_needs_restore = bool(data.get("restore_pending", False))
                 self._restore_saved_max_soc(data.get("saved_max_soc"))
+                self._restore_hold_state(data.get("hold_state"))
                 getattr(self, "_cutoff_applied_names", set()).clear()
                 ctrl._weekly_charge_status["state"] = data.get("state", "Idle")
                 ctrl._charge_delay_unlocked = data.get("delay_unlocked", False)
@@ -489,7 +568,7 @@ class WeeklyFullChargeManager:
                 # The last cycle ended while HA was offline: restore interrupted
                 # hardware cutoffs before the next weekly evaluation.
                 self._restore_saved_max_soc(data.get("saved_max_soc"))
-                unfinished = bool(data.get("registers_written")) and not data.get("complete")
+                unfinished = bool(data.get("registers_written") or ctrl._weekly_charge_saved_max_soc)
                 if bool(data.get("restore_pending")) or unfinished:
                     ctrl._weekly_charge_needs_restore = True
                     ctrl.weekly_full_charge_registers_written = False
@@ -515,6 +594,9 @@ class WeeklyFullChargeManager:
                 "state": ctrl._weekly_charge_status.get("state", "Idle"),
                 "restore_pending": bool(getattr(ctrl, "_weekly_charge_needs_restore", False)),
                 "saved_max_soc": dict(getattr(ctrl, "_weekly_charge_saved_max_soc", {})),
+                "hold_state": {
+                    name: dict(state) for name, state in getattr(self, "_hold_state", {}).items()
+                },
                 "date": now.date().isoformat(),
                 "cycle_date": (
                     ctrl._weekly_active_cycle_date.isoformat()
@@ -549,6 +631,24 @@ class WeeklyFullChargeManager:
                 continue
             if 0 <= value_int <= 100:
                 saved[str(name)] = value_int
+
+    def _restore_hold_state(self, stored: Any) -> None:
+        """Load valid maintenance records for batteries still in this entry."""
+        self._hold_state = {}
+        if not isinstance(stored, dict):
+            return
+        current_names = {c.name for c in self._controller.coordinators}
+        for name, state in stored.items():
+            if name not in current_names or not isinstance(state, dict):
+                continue
+            try:
+                soc = float(state["soc_at_full"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if isfinite(soc) and 0 <= soc <= 100:
+                self._hold_state[name] = {
+                    "soc_at_full": soc, "recharging": state.get("recharging") is True,
+                }
 
     @staticmethod
     def _original_max_soc(coordinator: Any) -> int:
@@ -614,6 +714,12 @@ class WeeklyFullChargeManager:
                 )
                 saved.pop(coordinator.name, None)
                 continue
+            if getattr(ctrl, "_tempo_charge_active", False):
+                # Tempo still requires 100% after this weekly window ends.
+                # A successful cutoff write does not refresh telemetry, so
+                # lowering it now could go unnoticed by Tempo's reconciler.
+                # Retain the original and pending restore through its window.
+                continue
 
             original_max_soc = saved[coordinator.name]
             try:
@@ -654,8 +760,8 @@ class WeeklyFullChargeManager:
         Responsibilities:
         - Write register 44000 to 100% on first activation (v2 only)
         - Detect completion (all batteries at 100% or BMS cutoff at 99%)
-        - Restore register 44000 to configured max_soc when complete
-        - Re-enable hysteresis after completion
+        - Hold each full battery independently until a hysteretic top-up is due
+        - Restore the configured ceiling at the end of the scheduled window
         """
         ctrl = self._controller
 
@@ -794,6 +900,7 @@ class WeeklyFullChargeManager:
             if c.data
             and not self._other_owner(c)
         ]
+        requests = {c.name: self.charge_requested(c) for c in batteries_with_data}
         all_batteries_full = bool(batteries_with_data) and all(
             self.is_battery_full(c)
             for c in batteries_with_data
@@ -804,6 +911,9 @@ class WeeklyFullChargeManager:
                 "soc": (c.data or {}).get("battery_soc"),
                 "bms_cutoff_cycles": self._bms_cutoff_counts.get(c.name, 0),
                 "is_full": self.is_battery_full(c),
+                "cutoff_confirmed": (
+                    not c.capabilities.hardware_soc_cutoff or c.name in applied_names
+                ),
             }
             for c in ctrl.coordinators
             if c.data
@@ -812,13 +922,24 @@ class WeeklyFullChargeManager:
 
         if all_batteries_full and not ctrl.weekly_full_charge_complete:
             await self._complete_weekly_charge("all_batteries_full")
+        elif not any(requests.values()) and any(
+            not state["cutoff_confirmed"] and not state["is_full"]
+            for state in ctrl._weekly_charge_status["batteries"].values()
+        ):
+            ctrl._weekly_charge_status["state"] = "Waiting for 100% cutoff"
+        elif ctrl.weekly_full_charge_complete:
+            ctrl._weekly_charge_status["state"] = (
+                "Charging to 100%" if any(requests.values()) else "Maintaining 100%"
+            )
 
     async def _complete_weekly_charge(self, reason: str) -> None:
-        """Mark weekly full charge complete and restore configured limits."""
+        """Record the full-charge milestone while keeping a scheduled hold."""
         ctrl = self._controller
-        _LOGGER.info("Weekly Full Charge: Complete (%s) - reverting to configured limits", reason)
+        one_shot = bool(getattr(ctrl, "_force_full_charge", False))
+        _LOGGER.info("Weekly Full Charge: Complete (%s)%s", reason,
+                     " - reverting to configured limits" if one_shot else " - maintaining until scheduled finish")
         ctrl.weekly_full_charge_complete = True
-        ctrl._weekly_charge_status["state"] = "Complete"
+        ctrl._weekly_charge_status["state"] = "Complete" if one_shot else "Maintaining 100%"
         ctrl._weekly_charge_status["completion_reason"] = reason
         completion_batteries: dict = {}
         for coordinator in ctrl.coordinators:
@@ -827,6 +948,8 @@ class WeeklyFullChargeManager:
             data = coordinator.data or {}
             soc = data.get("battery_soc")
             bms_cutoff_confirmed = self.is_battery_full(coordinator)
+            if not one_shot and soc is not None and bms_cutoff_confirmed:
+                self._set_hold_state(coordinator.name, float(soc), False)
             if soc is not None and soc >= 100:
                 per_battery_reason = "soc_100"
             elif bms_cutoff_confirmed:
@@ -877,16 +1000,16 @@ class WeeklyFullChargeManager:
                     measurement_state[coordinator] = "pending"
         self._bms_cutoff_counts.clear()
 
-        # Restore the saved hardware ceiling. Keep the saved values when a write
-        # fails so the next control cycle can retry instead of silently
-        # completing with the device still at 100%.
-        restored = await self._restore_hardware_cutoffs("weekly charge completion")
-        if restored:
-            ctrl._weekly_charge_saved_max_soc.clear()
-            getattr(self, "_cutoff_applied_names", set()).clear()
-            ctrl._weekly_charge_needs_restore = False
-        else:
-            ctrl._weekly_charge_needs_restore = True
+        # Only a one-shot forced charge restores immediately. A scheduled run
+        # retains its ceiling and original values through the holding window.
+        if one_shot:
+            restored = await self._restore_hardware_cutoffs("weekly charge completion")
+            if restored:
+                ctrl._weekly_charge_saved_max_soc.clear()
+                getattr(self, "_cutoff_applied_names", set()).clear()
+                ctrl._weekly_charge_needs_restore = False
+            else:
+                ctrl._weekly_charge_needs_restore = True
 
         # Clear the normal top-charge pause so next week starts fresh.
 
@@ -928,8 +1051,9 @@ class WeeklyFullChargeManager:
                     phase="top_charge_taper_complete",
                 )
 
-        # Re-enable hysteresis for batteries that have it configured.
-        for coordinator in ctrl.coordinators:
+        # The scheduled owner has its own persisted maintenance latch. Only a
+        # one-shot charge hands back to normal configured-ceiling hysteresis.
+        for coordinator in ctrl.coordinators if one_shot else ():
             if self._other_owner(coordinator):
                 continue
             if coordinator.enable_charge_hysteresis:

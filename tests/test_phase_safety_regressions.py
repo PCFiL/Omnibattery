@@ -32,7 +32,9 @@ def forced_controller(mode):
     ctl._tempo_charge_active = mode == "tempo"
     ctl.weekly_full_charge_enabled = mode == "weekly"
     ctl._weekly_full_charge_unlocked = lambda: mode == "weekly"
-    ctl._weekly_charge_mgr = SimpleNamespace(is_battery_full=lambda c: False)
+    ctl._weekly_charge_mgr = SimpleNamespace(
+        is_battery_full=lambda c: False, charge_requested=lambda c: True,
+    )
     ctl.predictive_charging_enabled = mode == "predictive"
     ctl.predictive_charging_overridden = False
     ctl.grid_charging_active = mode == "predictive"
