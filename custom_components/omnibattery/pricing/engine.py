@@ -6847,6 +6847,19 @@ class PricingManager:
 
     async def handle_time_slot_predictive_charging(self) -> None:
         """Handle predictive charging in time slot mode (extracted from main loop)."""
+        from ..control.predictive_schedule import describe_predictive_schedule
+
+        configuration = describe_predictive_schedule(self._controller)
+        status = configuration["configuration_status"]
+        if status != getattr(self, "_reported_time_slot_configuration", None):
+            self._reported_time_slot_configuration = status
+            if status not in {"ready", "not_required"}:
+                _LOGGER.warning(
+                    "Predictive charging has no usable configured time slot (%s). "
+                    "Enable alone does not authorise grid charging: configure the "
+                    "days and hours in Omnibattery's predictive charging options",
+                    status,
+                )
         # Check if we're in the actual time slot
         in_time_window = (
             bool(self._controller.charging_time_slots) and

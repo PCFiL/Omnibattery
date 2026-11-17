@@ -1,23 +1,24 @@
 # Predictive charging with fixed time slots
 
-Time Slot mode buys only the energy your home is expected to need during the cheap weekly windows you define. It never opens an unconfigured charging window.
+Time Slot mode buys only the energy your home is expected to need during the cheap weekly windows you define. It never opens an unconfigured charging window. Automatic predictive grid charging is restricted to **22:00 inclusive to 06:00 exclusive, Europe/Paris**; only the portion of a configured window inside those hours can authorize charging.
 
 ## Do I need it?
 
-**Use it if** your tariff has predictable off-peak periods that repeat on known days, including tariffs with separate night and midday periods.
+**Use it if** your tariff has predictable night-time off-peak periods that repeat on known days within 22:00–06:00 Europe/Paris.
 
 **You do not need it if** your provider publishes changing future prices and you want Omnibattery to pick the cheapest periods; use [Dynamic Pricing](dynamic-pricing.md). If you know only the current price, use [Real-Time Price](real-time-price.md).
 
 ## Before you start
 
 - Decide which days and start/end times are cheap. You can configure up to three predictive charging windows.
+- Enabling the feature requires a configured window; the switch alone does not create one. A window entirely outside 22:00–06:00 cannot authorize predictive grid charging.
 - A solar forecast sensor is optional. Prefer a remaining-energy sensor when available; a whole-day forecast is supported as a fallback.
 - Configure the common predictive-charging requirements described in [Which mode should I choose?](index.md).
 
 ## How to enable it
 
 1. Open **Settings → Devices & services → Omnibattery → Configure** and choose **Time Slot** as the predictive charging mode.
-2. Enter both the start and end time for **Charging window 1**, then select its active days.
+2. Enter both the start and end time for **Charging window 1**, then select its active days. For a full night, use **22:00–06:00**. Days refer to the start: Monday covers Monday evening through Tuesday morning. Select all seven starting days if you want this permission every night.
 3. Add **Charging windows 2 and 3** only if your tariff has more cheap periods; complete both times for every window you use.
 4. Select an optional solar forecast sensor, finish the form, and confirm **Predictive Charging** is on in the Omnibattery **Control** tab.
 
@@ -31,16 +32,23 @@ At the start of an active window, Omnibattery checks the remaining energy balanc
 
 The plan adapts inside an active window when SOC changes materially, the guaranteed floor is crossed or recovered, the provider revises the solar forecast, a relevant battery or forecast setting changes, or [capacity protection](../../features/peak-shaving.md) changes the power available to the plan.
 
+Turning predictive charging off and saving its options preserves the existing mode and windows for the next re-enable. A configuration that already lost its windows still needs them to be entered explicitly; an update does not add days or hours on your behalf.
+
+Weekly full charge has its own schedule and can run independently of the predictive windows. Finishing Sunday's weekly charge does not grant Monday's predictive charging permission: Monday still needs an enabled window. See the [evaluation order and mode priorities](../../features/predictive-phase-pd.md#evaluation-order-and-charging-permission).
+
 ## If it does not work
 
 | Symptom | Likely cause | What to check |
 |---|---|---|
 | Charging never starts | Today or the current time does not match a complete configured window | Start/end times, active days, and windows that cross midnight |
+| The switch is on and the balance shows an energy need, but there is no evaluation or charge request | The stored Time Slot schedule is empty | Diagnostics: `configured_windows: []`, `active_configured_window: null`, and often `last_evaluated_at: null`. Configure an explicit window such as 22:00–06:00 and its starting days |
 | The current window appears but no charge is needed | Battery energy and expected solar cover the remaining demand | **Predictive Charging Active** decision attributes |
-| A changed forecast does not start charging at midday | No configured charging window is open | Wait for the next window or add a tariff-valid window |
+| A changed forecast does not start charging at midday | The fixed 22:00–06:00 HC permission is closed | Wait for the next configured night window; adding a midday window does not override HC |
 | The first window stops before reaching the full daily target | Energy has been assigned to a later window | Per-window quota and remaining selected windows |
 | The plan reports an energy shortfall | The configured windows or physical charge power cannot deliver enough energy before its deadline | Window duration, charge limits, battery capacity, and active blockers |
 | Pressing re-evaluate does nothing | The button was pressed outside an active window | Press it during a configured window; outside one it prepares the next entry |
+
+For the complete distinction between a forecast, permission, blockers and delivered power, see [diagnosing a night without charge](../../features/predictive-phase-pd.md#enabled-time-slot-mode-with-no-configured-window).
 
 ??? "Advanced details"
     ### Evaluation and quotas

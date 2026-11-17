@@ -18,6 +18,60 @@ SOC targets** to each phase owner.
   mode has authorised a grid-charging slot and calculated a pending SOC target.
 - **Normal phase PD**: controls surplus absorption/house supply otherwise.
 
+## Evaluation order and charging permission
+
+An energy deficit, an enabled predictive switch and an authorized charging
+window are separate conditions. A forecast or preview may show that energy
+will be needed without granting permission to buy it from the grid. In
+**Time Slot** mode, at least one complete, enabled window must cover the
+current time and weekday within 22:00–06:00 Europe/Paris.
+
+The controller evaluates each cycle in this order:
+
+| Step | Evaluation | Effect on charging |
+| --- | --- | --- |
+| 1 | Read/update battery health, meter liveness, consumption history, balance monitoring and price-feed health. | These observations supply the subsequent decisions. |
+| 2 | Enforce EV pause, then global manual mode; apply individual manual setpoints. | EV pause stops every nonzero command. A manual owner excludes its battery from automatic dispatch. |
+| 3 | Read validated Tempo colors; manage weekly and Tempo hardware ceilings; update solar delay. | A full-charge owner can request 100%, but a failed weekly hardware-ceiling write remains pending for that battery. |
+| 4 | Reconcile a change of full-charge owner and refresh charge/discharge blockers. | Old predictive targets are invalidated when Tempo or the weekly window starts or ends. Expired weekly maintenance and schedule blockers are removed. |
+| 5 | Apply active manual operation slots, phase-safety reductions, top-charge measurement handling and the global-meter guard. | Explicit ownership and safety conditions can suspend automatic charging before mode dispatch. |
+| 6 | Dispatch Tempo first, then an active and unlocked weekly window, then the selected predictive mode; otherwise run normal fleet control. | Weekly charging has its own configured permission. Ordinary predictive charging needs its mode's authorization and a pending energy target. |
+| 7 | Run the phase dispatcher after the main controller, including after its early returns. | Configured Phase PD channels remain the sole automatic power writers for their batteries. The phase dispatcher independently respects manual/EV ownership and safety guards. |
+
+Inside the phase dispatcher, each available automatic battery first passes
+the phase-meter check and initial standby acknowledgement. Existing charge
+and discharge blockers set its allowed power, and protective reductions are
+applied before increasing a setpoint. It then selects the first applicable
+automatic request:
+
+| Priority | Request | Condition and handover |
+| --- | --- | --- |
+| 1 | Tempo preparation to 100% | Tempo control is enabled, the relevant red day is confirmed, predictive charging is enabled and not paused, and the pre-red off-peak window is open. |
+| 2 | Weekly full charge | The configured weekly window is active and any selected solar delay is released. Each battery charges or rests according to its retained full SOC and hysteresis until the scheduled finish. |
+| 3 | Low-SOC recovery | Recovery is enabled for that phase, its threshold has been crossed or its request is already latched, and the HC window is open. It releases at its configured recovery target. |
+| 4 | Ordinary predictive charge | The selected mode has authorized grid charging and that battery's calculated target is still above its current SOC. |
+| 5 | Normal Phase PD | No higher request applies. It absorbs surplus or supplies the house within the ordinary limits. |
+
+A recovery request is evaluated by the phase dispatcher even when the normal
+predictive planner has no target. When recovery finishes, a higher pending
+predictive target can continue; when a weekly window finishes, its 100% target
+does not carry over into the next night. Reaching full during a weekly window
+retains weekly ownership until the finish, so ordinary PD cannot discharge
+the battery in between maintenance top-ups.
+
+Before a positive grid-charge write, the phase dispatcher also checks the
+global meter, remaining import headroom and per-phase cap. Unmeasured command
+increments remain reserved in the shared budget. It requests a confirmed stop
+when a charge owner releases the battery, with retries for an unconfirmed
+stop. An active request therefore does not guarantee positive watts when a
+meter, owner, power limit or battery protection prevents them.
+
+Implementation references: the
+[controller cycle and mode dispatch](https://github.com/PCFiL/Omnibattery/blob/main/custom_components/omnibattery/__init__.py)
+(`async_update_charge_discharge`, `_run_control_cycle`) and
+[phase dispatcher](https://github.com/PCFiL/Omnibattery/blob/main/custom_components/omnibattery/control/phase_runtime.py)
+(`PhaseRuntime.run`).
+
 ## Deep-discharge protection settings
 
 In **Control**, the **Deep-discharge protection · off-peak recharge** card
@@ -38,6 +92,28 @@ Recovery is disabled by default, with a trigger **below 8%** and a target of
 enabled. Recovery charges only in **22:00–06:00 Europe/Paris**, and remains
 separate from the predictive **minimum SOC floor** setting. Reaching the
 recovery target releases the phase for the next authorized charging mode.
+
+The trigger is **strictly below** the configured start SOC; the stop is **at
+or above** the configured target. Once triggered, recovery remains requested
+while SOC rises above the start threshold, until the target is reached.
+Outside HC it waits without charging. The battery's configured maximum SOC
+can lower the effective recovery target.
+
+For example, if you choose a start of **9%** and a target of **15%**:
+
+| Battery state | Recovery behavior during HC |
+| --- | --- |
+| 10% or exactly 9%, with no earlier pending request | No new recovery request. |
+| Below 9%, for example 8% | Start a recovery request toward 15%. |
+| 9–14% after that request started | Continue recovery; crossing back above 9% does not cancel it. |
+| 15% or higher | Release recovery; the next applicable automatic owner may continue. |
+
+These values are an example, not fixed runtime thresholds. Consequently, a
+battery remaining at 9–10% does not by itself prove a recovery failure: check
+the configured start SOC and whether a request had already been latched.
+Recovery also does not create a missing ordinary predictive time slot. The
+[recovery policy](https://github.com/PCFiL/Omnibattery/blob/main/custom_components/omnibattery/control/phase_soc_recovery.py)
+defines these boundaries.
 
 ## EDF Tempo off-peak window (hard constraint)
 
@@ -149,6 +225,54 @@ physical battery delivery.
 
 ## Re-enabling and diagnosing a night without charge
 
+### Enabled Time Slot mode with no configured window
+
+An enabled predictive switch does not supply a default schedule. If stored
+`charging_time_slot` is `null` or an empty list, there is no Time Slot window
+to enter. The controller cannot start ordinary predictive charging, even
+when the displayed energy balance calls for more energy.
+
+In **Download diagnostics → predictive_charging**, this combination identifies
+the missing permission:
+
+| Field | Example | Meaning |
+| --- | --- | --- |
+| `enabled` / `overridden` | `true` / `false` | The feature is on and not explicitly paused. |
+| `mode` | `"time_slot"` | Permission must come from configured time slots. |
+| `configuration_status` | `"missing_time_slots"` | The enabled feature has no saved predictive schedule. |
+| `configuration_ready` | `false` | A configuration action is required before this mode can run. |
+| `configured_windows` | `[]` | There are no configured predictive windows. |
+| `active_configured_window` | `null` | No configured window can authorize the current cycle. |
+| `last_evaluated_at` | `null` | This controller session has not evaluated an entered predictive window. |
+| `grid_charge_requested` | `false` | No live grid-charge request was issued. |
+
+Inspect these fields together. An empty active window alone can simply mean
+that it is daytime, and an unset evaluation timestamp alone can mean that the
+integration has just restarted. A positive forecast/preview decision alone
+is not evidence that the live controller entered a configured window.
+
+To restore the schedule, open **Settings → Devices & services → Omnibattery
+→ Configure**, select the predictive **Time Slot** settings, and enter both
+**22:00** and **06:00**, with every starting weekday on which you want that
+night's charge. Save the form and leave predictive charging enabled. Monday
+means Monday evening through Tuesday morning; select all seven days only if
+you want this permission every night. Then check that diagnostics show a
+nonempty `configured_windows` list. During HC, its active window and live
+decision can be assessed separately from blockers and actual delivered power.
+
+Saving the predictive feature as disabled preserves its existing mode and
+time slots for a later re-enable. This prevents a toggle from erasing the
+schedule. An already empty legacy configuration still needs an explicit
+schedule; updating the code does not invent user-selected days or hours.
+
+The **Control** card and the overview show **No charging window configured**
+for this condition, with a **Configure charging windows** link to the
+integration's options. When a schedule is present, the Control card shows its
+actual days and hours. Disabled, invalid or entirely daytime-only windows are
+identified separately from the enable switch.
+
+### Live decisions and delivered power
+
 Saving an enabled predictive configuration clears the legacy pause flag as
 well as enabling the feature. This applies to Time Slot, Dynamic Pricing and
 Real-Time Price. Saving unrelated settings or restoring a deliberately paused
@@ -183,10 +307,11 @@ includes reported capacity, device setpoints and the grid meter's last
 publication time. A successful HTTP request is not evidence of physical
 charging. Reading the export does not re-evaluate the plan or send commands.
 
-Version **1.6.1** identifies this corrective release in Home Assistant's
-integration manifest and diagnostics. Updating the GitHub checkout alone does
-not update the code already loaded by Home Assistant; install the updated
-custom component and restart Home Assistant to load it.
+Check the integration version in Home Assistant's manifest/diagnostics.
+Updating the GitHub checkout alone does not update the code already loaded by
+Home Assistant; install the updated custom component and restart Home
+Assistant to load it. Loading corrected code and restoring a missing user
+schedule are separate steps.
 
 `tests/test_nightly_realistic_inputs.py` additionally runs full overnight
 scenarios with the real consumption trackers, cold or learned profiles, AROME
@@ -195,6 +320,12 @@ Zendure reports. The transport tests in
 `tests/test_zendure_phase_command_feedback.py` use the actual Zendure drivers
 and coordinators with simulated HTTP responses to check accepted commands
 against reported delivery.
+
+`tests/test_predictive_sequence_regressions_nov17.py` exercises the actual
+controller transition from a completed or interrupted Sunday weekly cycle to
+Monday's predictive window. It also checks that Tempo's 100% permission does
+not create weekly ownership outside the weekly window. Targets and charging
+authorization are produced by the real managers in these scenarios.
 
 ### Validation of version 1.6.1
 

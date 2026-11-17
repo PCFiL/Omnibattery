@@ -595,6 +595,7 @@ def _predictive_charging_info(controller, coordinators) -> dict[str, Any]:
     from homeassistant.util import dt as dt_util
 
     from .control.edf_tempo import PARIS, is_tempo_offpeak
+    from .control.predictive_schedule import describe_predictive_schedule
 
     now = dt_util.now().astimezone(PARIS)
     enabled = bool(getattr(controller, "predictive_charging_enabled", False))
@@ -609,6 +610,11 @@ def _predictive_charging_info(controller, coordinators) -> dict[str, Any]:
             window_error = str(exc)
 
     blockers, reasons = _charge_blocker_info(controller)
+    schedule = describe_predictive_schedule(controller)
+    configuration_ready = schedule["configuration_status"] in {"ready", "not_required"}
+    configuration_reasons = (
+        [] if configuration_ready else [schedule["configuration_status"]]
+    )
     decision = getattr(controller, "_last_decision_data", None) or {}
     # Dated forecast arrays/objects are already represented by the balance and
     # forecast diagnostics. Do not duplicate thousands of periods in this view.
@@ -680,9 +686,12 @@ def _predictive_charging_info(controller, coordinators) -> dict[str, Any]:
         "enabled": enabled,
         "overridden": overridden,
         "effective_enabled": enabled and not overridden,
+        "configuration_ready": configuration_ready,
+        "configuration_status": schedule["configuration_status"],
+        "configuration_block_reasons": configuration_reasons,
         "mode": getattr(controller, "predictive_charging_mode", None),
         "offpeak": is_tempo_offpeak(now),
-        "configured_windows": getattr(controller, "charging_time_slots", []),
+        "configured_windows": schedule["configured_windows"],
         "active_configured_window": active_slot,
         "window_error": window_error,
         "last_evaluated_window": getattr(controller, "_time_slot_active_window", None),

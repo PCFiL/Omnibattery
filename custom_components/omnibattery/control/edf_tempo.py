@@ -13,6 +13,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 PARIS = ZoneInfo("Europe/Paris")
+OFFPEAK_START = time(22, 0)
+OFFPEAK_END = time(6, 0)
 COLOR_SENSOR = "sensor.edf_tempo"
 RTE_TODAY_SENSOR = "sensor.rte_tempo_couleur_actuelle"
 RTE_TOMORROW_SENSOR = "sensor.rte_tempo_prochaine_couleur"
@@ -53,7 +55,7 @@ def is_tempo_offpeak(now: datetime) -> bool:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("Tempo off-peak check requires timezone-aware datetime")
     clock = now.astimezone(PARIS).time()
-    return clock >= time(22, 0) or clock < time(6, 0)
+    return clock >= OFFPEAK_START or clock < OFFPEAK_END
 
 
 def normalize_color(value: Any) -> str | None:

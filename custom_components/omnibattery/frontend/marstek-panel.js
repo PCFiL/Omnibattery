@@ -97,6 +97,13 @@ const I18N = {
     diagIntegration: "Integration", diagPhaseProtection: "Phase protection", diagPdState: "PD state", diagNetBalance: "Net balance", diagAlarm: "Alarm",
     diagActiveBatteries: "Active batteries", diagNonResponsive: "No response",
     diagDischargeWindow: "Discharge window", diagPredictive: "Predictive charging", diagCurtailment: "Smart pre-discharge", diagSurplusHold: "Surplus price hold", highPriceSale: "High-price sale", diagHighPriceDischarge: "High-price sale status", diagDischargeReserve: "Discharge reserve",
+    predictiveSlotsMissing: "No charging window configured",
+    predictiveSlotsDisabled: "No charging window enabled",
+    predictiveSlotsInvalid: "Charging windows need correction",
+    predictiveSlotsBlocked: "Predictive charging cannot start, even when Enable is on. Choose Predictive charging in the integration options to save the allowed days and times.",
+    predictiveSlotsReady: "Predictive charging windows",
+    predictiveSlotsConfigure: "Configure charging windows",
+    predictiveSlotDisabled: "disabled", predictiveSlotNextDay: "next day", predictiveSlotsEveryDay: "Every day", predictiveSlotsNoDays: "Days missing",
     diagPeak: "Peak shaving reserve", diagWeeklyCharge: "Weekly charge", diagChargeDelay: "Charge delay",
     nResponsive: "{n} no response", none: "None", disabled: "Disabled",
     noBatteriesTitle: "No batteries",
@@ -458,6 +465,13 @@ const I18N = {
     diagIntegration: "Intégration", diagPhaseProtection: "Protection de phase", diagPdState: "État PD", diagNetBalance: "Bilan net", diagAlarm: "Alarme",
     diagActiveBatteries: "Batteries actives", diagNonResponsive: "Sans réponse",
     diagDischargeWindow: "Fenêtre de décharge", diagPredictive: "Charge prédictive", diagCurtailment: "Pré-décharge intelligente", diagSurplusHold: "Retenue de surplus selon le prix", highPriceSale: "Vente à prix élevé", diagHighPriceDischarge: "État de la vente à prix élevé", diagDischargeReserve: "Réserve de décharge",
+    predictiveSlotsMissing: "Aucun créneau configuré",
+    predictiveSlotsDisabled: "Aucun créneau activé",
+    predictiveSlotsInvalid: "Créneaux à corriger",
+    predictiveSlotsBlocked: "La charge prédictive ne peut pas démarrer, même si « Activer » est allumé. Choisis Charge prédictive dans les options de l’intégration pour enregistrer les jours et horaires autorisés.",
+    predictiveSlotsReady: "Créneaux de charge prédictive",
+    predictiveSlotsConfigure: "Configurer les créneaux",
+    predictiveSlotDisabled: "désactivé", predictiveSlotNextDay: "lendemain", predictiveSlotsEveryDay: "Tous les jours", predictiveSlotsNoDays: "Jours non renseignés",
     diagPeak: "Réserve pour écrêtement de pointe", diagWeeklyCharge: "Charge hebdomadaire", diagChargeDelay: "Délai de charge",
     nResponsive: "{n} sans réponse", none: "Aucune", disabled: "Désactivé",
     noBatteriesTitle: "Aucune batterie",
@@ -5110,6 +5124,15 @@ class MarstekVenusPanel extends HTMLElement {
         const configured = this._sval(switchState);
         const fr = this._lang().toLowerCase().startsWith("fr");
         if (configured === "on") {
+          const attrs = switchState.attributes || {};
+          const configurationWarning = {
+            missing_time_slots: "predictiveSlotsMissing",
+            no_enabled_time_slots: "predictiveSlotsDisabled",
+            invalid_time_slots: "predictiveSlotsInvalid",
+          }[attrs.configuration_status];
+          if (attrs.predictive_charging_mode === "time_slot" && configurationWarning) {
+            return { text: this._t(configurationWarning), tone: "warn" };
+          }
           return raw === "on"
             ? { text: fr ? "Charge en cours" : "Charging", tone: "good" }
             : { text: fr ? "Activée · En veille" : "Enabled · Idle", tone: "good" };
@@ -7759,6 +7782,14 @@ class MarstekVenusPanel extends HTMLElement {
       frag.appendChild(btn);
       store[sk] = { type: "switch", el: btn };
       if (item.gateInvert) { store[sk].realId = id; store[sk].invert = true; }
+      if (item.key === K.predictiveSwitch) {
+        const summary = document.createElement("div");
+        summary.className = "predictive-config";
+        summary.setAttribute("aria-live", "polite");
+        frag.appendChild(summary);
+        store[sk].predictiveConfig = summary;
+        this._patchPredictiveConfiguration(summary, state);
+      }
     } else if (domain === "time") {
       const input = document.createElement("input");
       input.type = "time";
@@ -7836,6 +7867,7 @@ class MarstekVenusPanel extends HTMLElement {
 
   _patchSysControl(w, state) {
     if (!state || w.type === "button") return;
+    if (w.predictiveConfig) this._patchPredictiveConfiguration(w.predictiveConfig, state);
     if (w.titleEl && w.titleFn) w.titleEl.title = w.titleFn(state, this._t.bind(this)) || "";
     const focused = this.shadowRoot && this.shadowRoot.activeElement === w.el;
     if (w.type === "switch") {
@@ -7888,6 +7920,70 @@ class MarstekVenusPanel extends HTMLElement {
             : this._fmtCtlNum(state.state, step, unit);
       }
     }
+  }
+
+  /** Show the backend's actual scheduling prerequisites next to the switch.
+   *  This node belongs to the gate row itself, so Advanced and the feature's
+   *  on/off gate cannot hide a missing schedule. It never edits configuration. */
+  _patchPredictiveConfiguration(node, state) {
+    const attrs = state.attributes || {};
+    const status = attrs.configuration_status;
+    const titles = {
+      missing_time_slots: "predictiveSlotsMissing",
+      no_enabled_time_slots: "predictiveSlotsDisabled",
+      invalid_time_slots: "predictiveSlotsInvalid",
+      ready: "predictiveSlotsReady",
+    };
+    const titleKey = attrs.predictive_charging_mode === "time_slot" && titles[status];
+    node.hidden = !titleKey;
+    if (!titleKey) return;
+    const slots = Array.isArray(attrs.configured_windows) ? attrs.configured_windows : [];
+    const sig = JSON.stringify([this._lang(), status, slots, this._domain()]);
+    if (node.dataset.signature === sig) return;
+    node.dataset.signature = sig;
+    node.classList.toggle("warning", status !== "ready");
+    const title = document.createElement("strong");
+    title.textContent = this._t(titleKey);
+    node.replaceChildren(title);
+    if (status !== "ready") {
+      const message = document.createElement("p");
+      message.textContent = this._t("predictiveSlotsBlocked");
+      node.appendChild(message);
+    } else {
+      const list = document.createElement("ul");
+      for (const slot of slots) {
+        if (!slot || typeof slot !== "object") continue;
+        const item = document.createElement("li");
+        const configuredDays = Array.isArray(slot.days) ? slot.days : [];
+        const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+          .every(day => configuredDays.includes(day))
+          ? this._t("predictiveSlotsEveryDay")
+          : configuredDays.length
+            ? configuredDays.map(day => this._predictiveWeekday(day)).join(", ")
+            : this._t("predictiveSlotsNoDays");
+        const start = String(slot.start_time || "");
+        const end = String(slot.end_time || "");
+        const overnight = end && start && end <= start
+          ? " (" + this._t("predictiveSlotNextDay") + ")" : "";
+        const disabled = slot.enabled === false
+          ? " · " + this._t("predictiveSlotDisabled") : "";
+        item.textContent = `${days} · ${start} → ${end}${overnight}${disabled}`;
+        list.appendChild(item);
+      }
+      node.appendChild(list);
+    }
+    const link = document.createElement("a");
+    link.href = "/config/integrations/integration/" + encodeURIComponent(this._domain());
+    link.textContent = this._t("predictiveSlotsConfigure");
+    node.appendChild(link);
+  }
+
+  _predictiveWeekday(day) {
+    const index = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+      .indexOf(String(day).toLowerCase());
+    if (index < 0) return String(day);
+    return new Intl.DateTimeFormat(this._lang(), {weekday: "short", timeZone: "UTC"})
+      .format(new Date(Date.UTC(2020, 5, 1 + index)));
   }
 
   // Click/tap detail popover (works on touch, unlike hover `title`). One shared
@@ -8561,6 +8657,16 @@ class MarstekVenusPanel extends HTMLElement {
          and wrap, so sliders/buttons never overflow the card box at ~1080p */
       .sys-grid { margin-top: 14px; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); }
       .sys-sep { grid-column: 1 / -1; height: 1px; margin: 2px 0; background: var(--line); }
+      .predictive-config { grid-column: 1 / -1; min-width: 0; padding: 10px 12px;
+        border: 1px solid var(--line); border-radius: var(--radius-sm);
+        font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+      .predictive-config[hidden] { display: none; }
+      .predictive-config.warning { border-color: var(--warning-color, #e8a300);
+        background: rgba(255, 170, 0, .08); }
+      .predictive-config.warning strong { color: var(--warning-color, #e8a300); }
+      .predictive-config p { margin: 6px 0; }
+      .predictive-config ul { padding-left: 18px; margin: 6px 0; }
+      .predictive-config a { color: var(--accent); text-underline-offset: 2px; }
       .sys-grid .ctl-k { white-space: normal; overflow-wrap: anywhere; }
       /* Auto-fit can legitimately make a card ~300px wide. At that point a
          label/value pair leaves too little room for a usable range input. Stack

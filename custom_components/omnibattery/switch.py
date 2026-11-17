@@ -600,7 +600,7 @@ class PredictiveChargingSwitch(SwitchEntity):
     visible once predictive charging is configured, drives the ``enable`` flag,
     and the panel hides the sibling sliders when OFF.
 
-    ON  = predictive charging enabled and running.
+    ON  = predictive charging enabled; its schedule must also be configured.
     OFF = predictive charging disabled/paused.
 
     The two persisted booleans (``enabled`` = configured on, ``overridden`` =
@@ -632,8 +632,11 @@ class PredictiveChargingSwitch(SwitchEntity):
 
     @property
     def extra_state_attributes(self):
-        """Expose the global-kWh-preserving phase allocation and confidence."""
+        """Expose schedule readiness separately from the user's enable switch."""
+        from .control.predictive_schedule import describe_predictive_schedule
+
         return {
+            **describe_predictive_schedule(self.controller),
             "phase_energy_allocation": dict(
                 getattr(self.controller, "_phase_predictive_allocation", {})
             ),

@@ -90,6 +90,10 @@ jobs:
                 tests/test_predictive_options_reenable.py \
                 tests/test_predictive_live_reenable.py \
                 tests/test_predictive_charge_diagnostics.py \
+                tests/test_predictive_schedule_status.py \
+                tests/test_predictive_planner_regressions_nov17.py \
+                tests/test_predictive_sequence_regressions_nov17.py \
+                tests/test_predictive_integration_regressions_nov17.py \
                 tests/test_phase_recovery_config_api.py \
                 tests/test_time_slot_overnight_regressions.py \
                 tests/test_manual_slot_schedule.py \
@@ -128,7 +132,7 @@ jobs:
           retention-days: 14
 
   recovery-panel:
-    name: Recovery Control panel (Node 24)
+    name: Control panels (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -144,3 +148,7 @@ jobs:
         run: |
           OMNIBATTERY_HAPPY_DOM="$RUNNER_TEMP/omnibattery-ui-tests/node_modules/happy-dom/lib/index.js" \
             node scripts/test_phase_recovery_panel.mjs
+      - name: Show predictive schedule prerequisites in the real panel
+        run: |
+          OMNIBATTERY_HAPPY_DOM="$RUNNER_TEMP/omnibattery-ui-tests/node_modules/happy-dom/lib/index.js" \
+            node scripts/test_predictive_configuration_panel.mjs

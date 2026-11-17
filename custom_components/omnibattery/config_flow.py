@@ -5800,8 +5800,9 @@ class OptionsFlowHandler(OptionsFlow):
                 return await self.async_step_predictive_charging_mode()
             else:
                 self.config_data["enable_predictive_charging"] = False
-                self.config_data["charging_time_slot"] = None
-                self.config_data[CONF_PREDICTIVE_CHARGING_MODE] = PREDICTIVE_MODE_TIME_SLOT
+                # Disabling is a pause, as on the dashboard switch. Retain the
+                # user's authorized windows and pricing mode so a later ON can
+                # resume them. An entry that has no window remains unconfigured.
                 return await self._save_and_finish()
 
         is_predictive_enabled = self.config_entry.data.get("enable_predictive_charging", False)
