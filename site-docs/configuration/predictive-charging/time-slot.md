@@ -36,6 +36,42 @@ Turning predictive charging off and saving its options preserves the existing mo
 
 Weekly full charge has its own schedule and can run independently of the predictive windows. Finishing Sunday's weekly charge does not grant Monday's predictive charging permission: Monday still needs an enabled window. See the [evaluation order and mode priorities](../../features/predictive-phase-pd.md#evaluation-order-and-charging-permission).
 
+### A morning preview and the night-time decision
+
+After configuring the schedule or restarting Home Assistant during the day,
+Omnibattery can calculate the remaining-day energy balance before a charging
+window opens. If that preview finds energy that cannot be supplied by its
+forecast deadlines, its notification is **Predictive Charging: Waiting for
+configured window**. It shows the preview time, the next permitted window
+with both dates, and the forecast solar, consumption and grid-energy need.
+If no future permitted window is found, it asks you to check the configured
+days and hours instead of inventing a start time.
+
+For example, a preview at 09:00 can show a low SOC and a large energy need
+while the next configured window is 22:00–06:00. No predictive grid charge is
+authorized at 09:00. The displayed **forecast shortfall** describes energy the
+planner cannot place before its deadlines within that forecast horizon; actual
+power commands and AC delivery are recorded separately in diagnostics.
+
+On entry into the evening window, the controller makes a fresh decision from
+the then-current SOC and forecast. The morning preview's zero *current* quota
+does not freeze the evening decision. A new evaluation may request charging,
+find that enough energy is available, or defer to a higher-priority owner or
+protection. Showing the next permitted window therefore does not promise that
+the battery will physically begin charging at its opening.
+
+**Re-evaluate Predictive Charging** prepares a new live evaluation on the next
+control cycle inside a permitted window. Pressing it outside that window
+prepares its next entry; it does not override the HC boundary or start a manual
+charge. Weekly full charge, Tempo, low-SOC recovery, manual ownership and EV
+pause keep their existing priorities.
+
+Earlier notifications could describe the daytime preview as **Deferred by
+timeline** with **This configured window has no energy quota** even though no
+window was active. That wording now belongs to a live, active-window decision
+with a zero quota. The preview is explicitly identified as waiting for a
+configured window.
+
 ## If it does not work
 
 | Symptom | Likely cause | What to check |
@@ -43,6 +79,7 @@ Weekly full charge has its own schedule and can run independently of the predict
 | Charging never starts | Today or the current time does not match a complete configured window | Start/end times, active days, and windows that cross midnight |
 | The switch is on and the balance shows an energy need, but there is no evaluation or charge request | The stored Time Slot schedule is empty | Diagnostics: `configured_windows: []`, `active_configured_window: null`, and often `last_evaluated_at: null`. Configure an explicit window such as 22:00–06:00 and its starting days |
 | The current window appears but no charge is needed | Battery energy and expected solar cover the remaining demand | **Predictive Charging Active** decision attributes |
+| A daytime notification says `Waiting for configured window` despite a positive energy need | The balance is a forecast made before the next permitted window | The notification's evaluation time and next window; the live decision is recalculated on window entry |
 | A changed forecast does not start charging at midday | The fixed 22:00–06:00 HC permission is closed | Wait for the next configured night window; adding a midday window does not override HC |
 | The first window stops before reaching the full daily target | Energy has been assigned to a later window | Per-window quota and remaining selected windows |
 | The plan reports an energy shortfall | The configured windows or physical charge power cannot deliver enough energy before its deadline | Window duration, charge limits, battery capacity, and active blockers |

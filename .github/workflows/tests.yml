@@ -94,6 +94,9 @@ jobs:
                 tests/test_predictive_planner_regressions_nov17.py \
                 tests/test_predictive_sequence_regressions_nov17.py \
                 tests/test_predictive_integration_regressions_nov17.py \
+                tests/test_predictive_preview_handover.py \
+                tests/test_chronological_pricing.py \
+                tests/test_pricing_notifications.py \
                 tests/test_phase_recovery_config_api.py \
                 tests/test_time_slot_overnight_regressions.py \
                 tests/test_manual_slot_schedule.py \

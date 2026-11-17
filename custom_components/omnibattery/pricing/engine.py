@@ -3805,6 +3805,30 @@ class PricingManager:
             decision_data,
             now=now,
         )
+        # This method runs outside an authorized window. Its active quota is
+        # necessarily zero, even when the plan has energy assigned tonight.
+        # Keep that read-only preview distinct from an active-window refusal
+        # in notifications and diagnostics; it must not authorize charging.
+        # Inspect a full schedule week independently of the energy horizon:
+        # today's preview ends at midnight, but a 22:00–06:00 window does not.
+        next_window = next(
+            (
+                slot
+                for slot in self._time_slot_price_slots_for_horizon(
+                    now,
+                    now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    + timedelta(days=8),
+                )
+                if slot.start > now
+            ),
+            None,
+        )
+        decision_data.update({
+            "time_slot_evaluation_context": "outside_window",
+            "time_slot_evaluated_at": now,
+            "next_configured_window_start": next_window.start if next_window else None,
+            "next_configured_window_end": next_window.end if next_window else None,
+        })
         controller._last_decision_data = decision_data
         controller._time_slot_chronological_preview_date = now.date()
         if float(decision_data.get("deadline_shortfall_kwh", 0.0) or 0.0) > 0:

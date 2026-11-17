@@ -8,6 +8,7 @@ controller keeps the thin ``_send_*`` wrappers that read its config and push the
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 def _forecast_notification_context(decision: dict) -> dict:
@@ -218,6 +219,50 @@ def format_predictive_notification_message(
     power_str = _max_charge_power_str(
         max_contracted_power, max_charge_capacity, peak_limit
     )
+
+    if decision_data.get("time_slot_evaluation_context") == "outside_window":
+        # The daily preview may have a positive balance deficit but no quota
+        # active *now*. It never authorizes a power write, so it must not use
+        # the live STARTED/deferred/not-required decision labels below.
+        def local_stamp(value):
+            if not isinstance(value, datetime):
+                return None
+            if value.tzinfo is not None:
+                value = value.astimezone(ZoneInfo("Europe/Paris"))
+            return value.strftime("%Y-%m-%d %H:%M")
+
+        evaluated = local_stamp(decision_data.get("time_slot_evaluated_at"))
+        start = local_stamp(decision_data.get("next_configured_window_start"))
+        end = local_stamp(decision_data.get("next_configured_window_end"))
+        shortfall = float(decision_data.get("deadline_shortfall_kwh", 0.0) or 0.0)
+        title = "Predictive Charging: Waiting for configured window"
+        message = (
+            "🕒 Outside configured predictive charging hours.\n"
+            "Grid charging is permitted only inside configured windows within "
+            "22:00–06:00 Europe/Paris. This preview does not start a grid charge.\n\n"
+            + (f"Preview evaluated: {evaluated} (Europe/Paris).\n\n" if evaluated else "")
+            + f"🔋 Battery: {avg_soc:.0f}% ({usable_energy:.2f} kWh usable)\n"
+            + forecast_lines
+            + f"⚡ Forecast grid need for this horizon: {energy_deficit:.2f} kWh\n"
+            + (
+                f"⚠️ Forecast shortfall against deadlines within this horizon: {shortfall:.2f} kWh\n"
+                if shortfall > 0 else ""
+            )
+            + "\n"
+        )
+        if start and end:
+            message += (
+                f"⏰ Next configured window: {start} → {end} (Europe/Paris).\n"
+                "On entry, the controller re-evaluates battery SOC and forecasts. "
+                "Charging is requested only if needed and allowed by the current "
+                "charging priorities and safety limits."
+            )
+        else:
+            message += (
+                "No upcoming permitted window was found. "
+                "Check the configured days and hours."
+            )
+        return (title, message)
 
     # Safe mode: no solar forecast
     if solar_forecast is None:

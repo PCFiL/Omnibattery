@@ -491,7 +491,50 @@ def test_time_slot_preview_is_built_before_the_first_window():
 
     assert controller._time_slot_chronological_preview_date == BASE.date()
     assert controller._last_decision_data["deadline_shortfall_kwh"] == 0.4
+    assert controller._last_decision_data["time_slot_evaluation_context"] == "outside_window"
+    assert controller._last_decision_data["time_slot_evaluated_at"] == now
+    assert controller._last_decision_data["next_configured_window_start"] == BASE + timedelta(hours=3)
+    assert controller._last_decision_data["next_configured_window_end"] == BASE + timedelta(hours=4)
     assert len(notifications) == 1
+
+
+@pytest.mark.parametrize("days, next_day", [(["tue"], 0), (["mon"], 6)])
+def test_time_slot_preview_reports_the_complete_next_authorized_window(days, next_day):
+    """The daytime horizon stops at midnight; the displayed HC night does not."""
+    now = BASE + timedelta(hours=9)
+    controller = SimpleNamespace(
+        charging_time_slots=[
+            {"start_time": "22:00", "end_time": "06:00", "days": days},
+        ],
+        _time_slot_chronological_preview_date=None,
+        solar_forecast_remaining_sensor=None,
+        solar_forecast_sensor=None,
+        _last_decision_data=None,
+    )
+    manager = PricingManager(SimpleNamespace(), controller)
+
+    async def decision():
+        return {"should_charge": True}
+
+    async def notify(**_kwargs):
+        pass
+
+    manager._current_horizon_grid_charging_decision = decision
+    manager._apply_time_slot_chronological_plan = lambda data, now: {
+        **data, "should_charge": False, "deadline_shortfall_kwh": 12.07,
+    }
+    manager._send_predictive_charging_notification = notify
+
+    asyncio.run(manager._ensure_time_slot_chronological_preview(now=now))
+
+    preview = controller._last_decision_data
+    assert preview["next_configured_window_start"] == BASE + timedelta(days=next_day, hours=22)
+    assert preview["next_configured_window_end"] == BASE + timedelta(days=next_day + 1, hours=6)
+    assert preview["time_slot_evaluation_context"] == "outside_window"
+    # Displaying the next window neither enlarges the energy horizon nor grants
+    # permission to charge during the daytime preview.
+    assert preview["should_charge"] is False
+    assert preview["deadline_shortfall_kwh"] == 12.07
 
 
 def test_time_slot_preview_keeps_balance_diagnostics_after_last_window():

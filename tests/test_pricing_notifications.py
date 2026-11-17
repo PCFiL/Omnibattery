@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from custom_components.omnibattery.pricing import (
     PriceSlot,
@@ -82,6 +85,91 @@ def test_predictive_started():
     assert title == "Predictive Charging: STARTED"
     assert "06:00" in message  # end of charging slot
     assert "contracted: 5000W, batteries: 3000W" in message
+
+
+def test_outside_window_preview_reports_the_next_permission_and_forecast_shortfall():
+    paris = ZoneInfo("Europe/Paris")
+    decision = _decision(
+        should_charge=False,
+        aggregate_should_charge=True,
+        chronological_deferred=True,
+        avg_soc=10.0,
+        usable_energy_kwh=0.0,
+        solar_forecast_kwh=2.87,
+        remaining_consumption_kwh=26.74,
+        consumption_scope="remaining_profile",
+        energy_deficit_kwh=25.07,
+        deadline_shortfall_kwh=12.07,
+        time_slot_evaluation_context="outside_window",
+        time_slot_evaluated_at=datetime(2026, 11, 17, 9, tzinfo=paris),
+        next_configured_window_start=datetime(2026, 11, 17, 22, tzinfo=paris),
+        next_configured_window_end=datetime(2026, 11, 18, 6, tzinfo=paris),
+    )
+
+    title, message = notifications.format_predictive_notification_message(
+        decision, **{**_CFG, "charging_time_slot": None},
+    )
+
+    assert title == "Predictive Charging: Waiting for configured window"
+    assert "2026-11-17 09:00" in message
+    assert "2026-11-17 22:00" in message
+    assert "2026-11-18 06:00" in message
+    assert "Europe/Paris" in message
+    assert "2.87 kWh" in message
+    assert "26.74 kWh" in message
+    assert "25.07 kWh" in message
+    assert "Forecast shortfall" in message
+    assert "12.07 kWh" in message
+    assert "re-evaluat" in message.lower()
+    assert "no energy quota" not in message
+    assert "STARTED" not in title
+    assert "Charging will activate" not in message
+
+
+@pytest.mark.parametrize("should_charge,solar", [(True, 2.87), (False, 2.87), (True, None)])
+def test_outside_window_preview_without_a_future_window_never_announces_a_start(
+    should_charge, solar,
+):
+    title, message = notifications.format_predictive_notification_message(
+        _decision(
+            should_charge=should_charge,
+            solar_forecast_kwh=solar,
+            energy_deficit_kwh=25.07 if should_charge else 0,
+            time_slot_evaluation_context="outside_window",
+            time_slot_evaluated_at=datetime(2026, 11, 17, 9, tzinfo=ZoneInfo("Europe/Paris")),
+            next_configured_window_start=None,
+            next_configured_window_end=None,
+        ),
+        **{**_CFG, "charging_time_slot": None},
+    )
+
+    assert title == "Predictive Charging: Waiting for configured window"
+    assert "No upcoming permitted window was found" in message
+    assert "Check the configured days and hours" in message
+    assert "Next configured window:" not in message
+    assert "2026-11-17 22:00" not in message
+    assert "STARTED" not in title
+    assert "Charging now from grid" not in message
+    assert "no energy quota" not in message
+    if solar is None:
+        assert "unavailable" in message
+
+
+def test_active_window_with_zero_quota_keeps_its_timeline_deferral_message():
+    title, message = notifications.format_predictive_notification_message(
+        _decision(
+            chronological_deferred=True,
+            should_charge=False,
+            aggregate_should_charge=True,
+            energy_deficit_kwh=25.07,
+            deadline_shortfall_kwh=12.07,
+        ),
+        **_CFG,
+    )
+
+    assert title == "Predictive Charging: Deferred by timeline"
+    assert "configured window has no energy quota" in message
+    assert "12.07 kWh" in message
 
 
 def test_predictive_max_power_accounts_for_peak_shaving():
