@@ -33,6 +33,7 @@ def _profile(days=None, *, slots=None, fallback_daily=5.0):
     profile = ConsumptionProfileTracker.__new__(ConsumptionProfileTracker)
     profile._aggregate_cache = {}
     profile._aggregate_cache_date = None
+    profile._level_cache = {}
     profile._days = days or {}
     profile._controller = SimpleNamespace(
         charging_time_slots=slots or [],

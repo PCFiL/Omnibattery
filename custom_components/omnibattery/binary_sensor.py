@@ -702,6 +702,13 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
                 "overnight_consumption_kwh": decision.get("overnight_consumption_kwh"),
                 "chronological_planning_active": chronological_active,
                 "chronological_source": _chronological_value("chronological_source"),
+                "battery_charge_power_w": _chronological_value("battery_charge_power_w"),
+                "battery_discharge_limit_w": _chronological_value("battery_discharge_limit_w"),
+                "grid_carried_load_kwh": _chronological_value("grid_carried_load_kwh"),
+                "phase_charge_limits_w": _chronological_value("phase_charge_limits_w"),
+                "phase_charge_energy_targets_kwh": decision.get("phase_charge_energy_targets_kwh"),
+                "phase_charge_energy_requested_kwh": decision.get("phase_charge_energy_requested_kwh"),
+                "phase_charge_shortfall_kwh": decision.get("phase_charge_shortfall_kwh"),
                 "solar_timeline_source": _chronological_value(
                     "solar_timeline_source"
                 ),

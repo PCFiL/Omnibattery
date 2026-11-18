@@ -1255,3 +1255,24 @@ def test_memoized_wall_grid_is_not_mutated_between_builds():
     assert second == first
     # A fall-back day still owns 25 physical hours after the second build.
     assert sum(second["duration_s"]) == 25 * 3600
+
+
+def test_batched_routine_change_keeps_an_earlier_immediate_notification():
+    """An interval close stays immediate when the same refresh updates its plan."""
+    manager = _manager(MutableClock(datetime(2026, 8, 23, 10, 7, tzinfo=MADRID)))
+    seen = []
+    manager.async_add_listener(lambda m: seen.append(m.last_notification_immediate))
+
+    manager.begin_update_batch()
+    manager._mark_public_change("interval", immediate=True)
+    manager._notify_listeners()
+    manager._mark_public_change("plan")
+    manager._notify_listeners()
+    manager.end_update_batch()
+
+    manager.begin_update_batch()
+    manager._mark_public_change("plan")
+    manager._notify_listeners()
+    manager.end_update_batch()
+
+    assert seen == [True, False]

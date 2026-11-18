@@ -207,6 +207,36 @@ class PhaseDemandProfile:
         except Exception:
             _LOGGER.exception("Phase demand profile: cannot persist history")
 
+    def forecast_hourly_residual_w(self) -> dict[str, dict[int, float]]:
+        """Observed net demand by local hour, for charge-capacity estimates.
+
+        Reuse the existing 24-hour samples without changing the daytime SOC
+        allocation. Each hour needs three completed days with at least 45
+        minutes on every phase; missing hours stay missing, never zero.
+        """
+        if not self._valid_runtime():
+            return {}
+        today = dt_util.now().date().isoformat()
+        result = {p: {} for p in PHASES}
+        for hour in range(24):
+            values = []
+            for day in sorted(self.days, reverse=True):
+                if day >= today:
+                    continue
+                phases = self.days[day]
+                if any(phases[p]["seconds"][hour] < 2700 for p in PHASES):
+                    continue
+                values.append({
+                    p: phases[p]["energy"][hour] * 3600000 / phases[p]["seconds"][hour]
+                    for p in PHASES
+                })
+                if len(values) >= 7:
+                    break
+            if len(values) >= MIN_TRAINING_DAYS:
+                for phase in PHASES:
+                    result[phase][hour] = sum(v[phase] for v in values) / len(values)
+        return result
+
     def forecast_daytime(self) -> dict[str, float] | None:
         """Return projected residual daytime kWh by phase, with confidence guard.
 

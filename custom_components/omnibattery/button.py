@@ -103,7 +103,7 @@ class ReevaluateDynamicPricingButton(ButtonEntity):
             # makes the next cycle inside a window run a full initial
             # evaluation, notification included; outside one it does nothing,
             # which is correct — that mode cannot charge there anyway.
-            self.controller.invalidate_predictive_plan("re-evaluate button")
+            self.controller.invalidate_predictive_plan("re-evaluate button", immediate=True)
             return
         # The button is commonly pressed after a price/forecast adjustment.  It
         # must not reuse the full-day 00:05 balance after energy has elapsed.

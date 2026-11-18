@@ -39,8 +39,25 @@ def _profile_with_days(days=3, demand=(2.0, 3.0, 9.0)):
 
 
 def test_phase_forecast_requires_three_completed_days():
-    assert _profile_with_days(days=2).forecast_daytime() is None
-    assert _profile_with_days(days=2).diagnostics["source"] == "fallback"
+    profile = _profile_with_days(days=2)
+    assert profile.forecast_daytime() is None
+    assert profile.diagnostics["source"] == "fallback"
+
+
+def test_hourly_residual_forecast_preserves_missing_night_data():
+    profile = _profile_with_days()
+    hourly = profile.forecast_hourly_residual_w()
+    assert hourly["L3"][12] == pytest.approx(9.0 / 16 * 1000)
+    assert 22 not in hourly["L3"]
+    # Missing observations must not turn into zero house load/headroom.
+    for day in profile.days.values():
+        for p, power in zip(("L1", "L2", "L3"), (300, 600, 1500)):
+            day[p]["energy"][22] = power / 1000
+            day[p]["seconds"][22] = 3600
+    hourly = profile.forecast_hourly_residual_w()
+    assert hourly["L3"][22] == pytest.approx(1500)
+    next(iter(profile.days.values()))["L2"]["seconds"][22] = 1000
+    assert 22 not in profile.forecast_hourly_residual_w()["L3"]
 
 
 def test_phase_forecast_prioritizes_heavy_l3():

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.omnibattery.const import CHARGE_EFFICIENCY
 from custom_components.omnibattery.pricing import PriceSlot
 from custom_components.omnibattery.pricing.chronological import (
     ChronologicalEvaluationRequest,
@@ -570,3 +571,112 @@ def test_time_slot_preview_keeps_balance_diagnostics_after_last_window():
     assert controller._last_decision_data["stored_energy_kwh"] == pytest.approx(4.2)
     assert controller._last_decision_data["avg_consumption_kwh"] == pytest.approx(7.1)
     assert controller._last_decision_data["energy_deficit_kwh"] == pytest.approx(0.0)
+
+
+def test_extended_horizon_plans_tomorrows_charge_while_the_battery_is_full_now():
+    """A full battery has no room now, but drains before tomorrow's deficit.
+
+    Regression: the extended (tomorrow-included) plan capped what it may
+    charge at the room *now*, so a 100% battery planned nothing and the
+    notification reported "no valid price slots" for a real deficit.
+    """
+    capacity = 7.0
+    # 12 h of 0.25 kWh per quarter (12 kWh) from a full battery: it empties
+    # after 7 kWh and needs 5 kWh more before the horizon ends.
+    intervals = [_interval(i, 0.25) for i in range(48)]
+    deadlines = build_energy_deadlines(
+        intervals, capacity, usable_capacity_kwh=capacity
+    )
+    # Cheap slot after the battery has drained (hours 8-10), dear one now.
+    cheap = _slot(8 * 60, 10 * 60, 0.05)
+    dear = _slot(0, 60, 0.40)
+
+    plan = allocate_price_slots(
+        intervals,
+        deadlines,
+        [dear, cheap],
+        total_required_kwh=0.0,
+        effective_power_kw=4.0,
+        now=BASE,
+        horizon_end=BASE + timedelta(hours=12),
+        headroom_kwh=0.0,
+        usable_initial_kwh=capacity,
+        required_from_deadlines=True,
+    )
+
+    by_slot = {a.slot: a.planned_battery_kwh for a in plan.allocations}
+    # The cheap slot fills the gap from 08:00 (2 h at 4 kW, capped by need).
+    assert by_slot[cheap] == pytest.approx(4.0, abs=0.05)
+    # The battery is full when the dear slot opens and the grid feeds the
+    # house while it charges, so nothing drains to make room: no allocation.
+    assert dear not in by_slot
+    assert plan.deadline_shortfall_kwh == pytest.approx(0.0)
+
+
+def test_control_horizon_still_caps_at_the_room_now():
+    """Without the extended horizon a full battery stays a no-charge plan."""
+    capacity = 7.0
+    intervals = [_interval(i, 0.25) for i in range(48)]
+    deadlines = build_energy_deadlines(
+        intervals, capacity, usable_capacity_kwh=capacity
+    )
+    plan = allocate_price_slots(
+        intervals,
+        deadlines,
+        [_slot(8 * 60, 10 * 60, 0.05)],
+        total_required_kwh=5.0,
+        effective_power_kw=4.0,
+        now=BASE,
+        horizon_end=BASE + timedelta(hours=12),
+        headroom_kwh=0.0,
+        usable_initial_kwh=capacity,
+    )
+    assert plan.total_required_kwh == pytest.approx(0.0)
+    assert not plan.allocations
+
+
+def test_extended_horizon_counts_earlier_charge_as_drained_before_a_later_slot():
+    """Energy booked at 17:00 is used by 22:00; the 01:00 slot has full room.
+
+    Regression (A2): ``room_at_start`` added earlier allocations after
+    flooring the drain at zero, so the 17:00 charge still looked stored at
+    01:00. The 01:00 slot was capped at 4 kWh, the plan said "ok", and the
+    battery ran out at 07:00.
+    """
+    now = datetime(2026, 11, 9, 16, 0)
+
+    def hour(n):
+        return now + timedelta(hours=n)
+
+    def load(n):
+        clock = hour(n).hour
+        if 18 <= clock < 22:
+            return 1.5
+        return 1.0 if 2 <= clock < 8 else 0.0
+
+    intervals = [EnergyInterval(hour(i), hour(i + 1), load(i), 0.0) for i in range(16)]
+    capacity = 10.0
+    evening = PriceSlot(hour(1), hour(2), 0.10)  # 17:00
+    night = PriceSlot(hour(9), hour(10), 0.05)  # 01:00
+    deadlines = build_energy_deadlines(intervals, 0.0, usable_capacity_kwh=capacity)
+
+    plan = allocate_price_slots(
+        intervals,
+        deadlines,
+        [evening, night],
+        total_required_kwh=12.0,
+        effective_power_kw=6.0 / CHARGE_EFFICIENCY,
+        now=now,
+        horizon_end=hour(16),
+        headroom_kwh=capacity,
+        usable_initial_kwh=0.0,
+        required_from_deadlines=True,
+    )
+
+    by_slot = {a.slot: a.planned_battery_kwh for a in plan.allocations}
+    assert by_slot[evening] == pytest.approx(6.0, abs=0.05)
+    assert by_slot[night] == pytest.approx(6.0, abs=0.05)
+    simulation = simulate_allocations(
+        intervals, 0.0, plan.allocations, usable_capacity_kwh=capacity
+    )
+    assert simulation.earliest_depletion_at is None

@@ -43,7 +43,7 @@ def issues(monkeypatch):
 @pytest.fixture
 def clock(monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr(omnibattery_init.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(omnibattery_init._stdlib_time, "monotonic", lambda: now[0])
     return now
 
 

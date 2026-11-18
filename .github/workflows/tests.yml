@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, ha-flows, historical-regressions, phase-transitions, nightly-charging]
+        suite: [unit, ha-flows, historical-regressions, phase-transitions, nightly-charging, upstream-backports]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,6 +56,23 @@ jobs:
                 tests/test_config_backup.py \
                 tests/test_domain_migration.py \
                 tests/test_system_uid_migration.py
+              ;;
+            upstream-backports)
+              # Keep the targeted upstream adapters independently visible;
+              # the complete unit suite above remains enabled.
+              python -m pytest -ra --junitxml="$report" \
+                tests/test_daily_operation_manager.py \
+                tests/test_daily_operation_sensor.py \
+                tests/test_unload_robustness.py \
+                tests/test_predictive_dispatch_error.py \
+                tests/test_replan_inputs.py \
+                tests/test_predictive_replan_local.py \
+                tests/test_solar_period_sums.py \
+                tests/test_solar_forecast_health.py \
+                tests/test_arome_forecast_adapter.py \
+                tests/test_fleet_charge_power.py \
+                tests/test_predictive_physical_limits.py \
+                tests/test_phase_demand_profile.py
               ;;
             historical-regressions)
               # Explicit proof that all four historical failures are exercised

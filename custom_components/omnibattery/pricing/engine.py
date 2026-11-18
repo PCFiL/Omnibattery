@@ -107,6 +107,7 @@ from .chronological import (
     EnergyDeadline,
     EnergyInterval,
     build_energy_deadlines,
+    cap_battery_drain,
     evaluate_chronological_request,
     normalize_energy_shape,
 )
@@ -132,6 +133,9 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+# Seconds a settings change must stand before it re-plans (see the dirty flag).
+CONFIG_REPLAN_SETTLE_S = 3.0
 
 # A configured forecast may briefly be unavailable while its provider refreshes
 # around midnight.  This is a retry grace period, not a delay applied to every
@@ -159,6 +163,10 @@ CURTAILMENT_AUTO_REPLAN_COOLDOWN_S = 60.0
 # the chronological planner.
 _CHRONOLOGICAL_DIAGNOSTIC_KEYS = (
     "chronological_source",
+    "battery_discharge_limit_w",
+    "grid_carried_load_kwh",
+    "battery_charge_power_w",
+    "phase_charge_limits_w",
     "solar_timeline_source",
     "solar_forecast_original_source",
     "solar_forecast_conversion",
@@ -2939,6 +2947,286 @@ class PricingManager:
         except Exception:  # noqa: BLE001
             return False
 
+    def _fleet_charge_power_kw(
+        self, coordinators: Sequence[Any], room_kwh: Sequence[float],
+        energy_kwh: float, *, now: datetime | None = None, slots=(),
+    ) -> float | None:
+        """Available fleet rate, with a timed profile for a phase-local plan."""
+        from .physical_limits import planning_charge_profile, phase_charge_shares
+
+        rates, self._phase_charge_limits, self._planning_charge_segments = planning_charge_profile(
+            self._controller, coordinators, now=now, slots=slots,
+        )
+        self._planning_charge_rates = dict(zip(coordinators, rates or ()))
+        self._planning_phase_shares = None
+        self._planning_phase_budget_active = False
+        if rates is None:
+            return None
+        average = calculations.fleet_charge_power_kw(
+            [(room, watts / 1000.0) for room, watts in zip(room_kwh, rates)],
+            energy_kwh,
+        )
+        shares = phase_charge_shares(
+            self._controller, coordinators, room_kwh, energy_kwh
+        )
+        if shares is not None:
+            # Keep the original needs through both physical bounds. Applying
+            # phase weights again to an already reduced fleet quota would
+            # discard attainable energy on the less-loaded phases.
+            self._planning_phase_shares = shares
+            if (
+                self._planning_charge_segments
+                and getattr(self._controller, "predictive_charging_mode", None)
+                == PREDICTIVE_MODE_TIME_SLOT
+            ):
+                # The interval profile, not this maximum, determines capacity.
+                # An average across windows would borrow a quiet later hour's
+                # headroom for a busy current hour, or suppress an early one.
+                return max(sum(values) / 1000.0 for _start, _end, values in self._planning_charge_segments)
+        return average
+
+    def _bound_phase_time_slot_quota(
+        self, quota: float, *, now: datetime, candidates, decision_data: dict,
+    ) -> float:
+        """Keep an infeasible P3 share visible, without filling P1 instead.
+
+        Only ordinary Time Slot quotas use this second-stage bound. Full
+        charge and guaranteed-SOC owners keep their existing targets and
+        priority; the hardware dispatcher still limits all of them live.
+        """
+        from .physical_limits import phase_charge_shares, planning_charge_limits
+
+        decision_data.pop("phase_charge_energy_targets_kwh", None)
+        decision_data.pop("phase_charge_energy_requested_kwh", None)
+        decision_data.pop("phase_charge_shortfall_kwh", None)
+        if quota <= 0 or decision_data.get("floor_active"):
+            return quota
+        weekly = getattr(self._controller, "_weekly_full_charge_pending", None)
+        if (
+            getattr(self._controller, "_tempo_charge_active", False)
+            or (callable(weekly) and weekly())
+        ):
+            return quota
+        rates = getattr(self, "_planning_charge_rates", {})
+        coordinators = list(rates)
+        ceiling = getattr(self._controller, "_charge_ceiling_soc", None)
+        room = [
+            max(0.0, (
+                (float(ceiling(c)) if callable(ceiling) else float(c.max_soc))
+                - float(c.data.get("battery_soc", 0) or 0)
+            ) / 100.0 * float(c.data.get("battery_total_energy", 0) or 0))
+            for c in coordinators
+        ]
+        budget_active = getattr(self, "_planning_phase_budget_active", False)
+        shares = getattr(self, "_planning_phase_shares", None) if budget_active else None
+        if shares is None or set(shares) != set(coordinators):
+            shares = phase_charge_shares(self._controller, coordinators, room, quota)
+        if shares is None:
+            return quota
+        active = next((s for s in candidates if s.start <= now < s.end), None)
+        if active is None:
+            return quota
+        hours = max(0.0, (active.end - now).total_seconds() / 3600.0)
+        # Never reuse a rate averaged over other candidate windows.
+        active_rates, _detail = planning_charge_limits(
+            self._controller, coordinators, now=now, slots=[active],
+        )
+        if active_rates is None:
+            return quota
+        bounded = {
+            c.name: min(shares[c], max(0.0, watts) / 1000.0 * hours * CHARGE_EFFICIENCY)
+            for c, watts in zip(coordinators, active_rates)
+        }
+        result = sum(bounded.values())
+        # Chronological deadlines, aggregate grid import and room still cap
+        # the total, without recomputing phase-demand weights on that total.
+        if result > quota:
+            bounded = {name: value * quota / result for name, value in bounded.items()}
+            result = quota
+        decision_data["phase_charge_energy_targets_kwh"] = bounded
+        decision_data["phase_charge_energy_requested_kwh"] = {c.name: shares[c] for c in coordinators}
+        # Only a single active window owns the full original phase budget.
+        # A multi-window plan may serve its remaining need later, so its
+        # diagnostic counts only what this active allocation could not serve.
+        requested = sum(shares.values()) if budget_active else quota
+        decision_data["phase_charge_shortfall_kwh"] = round(max(0.0, requested - result), 3)
+        return result
+
+    @staticmethod
+    def _fleet_discharge_limit_w(coordinators: Sequence[Any]) -> float | None:
+        """Summed discharge power of ``coordinators``; ``None`` if unknown."""
+        if not coordinators:
+            return None
+        total = 0.0
+        for c in coordinators:
+            try:
+                total += max(0.0, float(getattr(
+                    c,
+                    "effective_max_discharge_power",
+                    getattr(c, "max_discharge_power", None),
+                )))
+            except (TypeError, ValueError):
+                return None
+        return total if math.isfinite(total) else None
+
+    def _scalar_horizon_end(
+        self, decision_data: Mapping[str, Any], *, now: datetime, default: datetime
+    ) -> datetime:
+        """End of the horizon the scalar balance in ``decision_data`` covers."""
+        end = decision_data.get("energy_horizon_end")
+        if not isinstance(end, datetime):
+            return default
+        if end.tzinfo is None and now.tzinfo is not None:
+            return end.replace(tzinfo=now.tzinfo)
+        if end.tzinfo is not None and now.tzinfo is None:
+            # Naive control times are the HA local wall clock, not the host's.
+            from zoneinfo import ZoneInfo
+
+            zone = getattr(getattr(self._hass, "config", None), "time_zone", None)
+            try:
+                tz = ZoneInfo(zone) if zone else None
+            except (KeyError, ValueError):
+                tz = None
+            return end.astimezone(tz).replace(tzinfo=None)
+        if end.tzinfo is not None:
+            return end.astimezone(now.tzinfo)
+        return end
+
+    def _net_grid_carried_load(
+        self,
+        decision_data: dict[str, Any],
+        carried_kwh: float,
+        *,
+        publish: bool,
+    ) -> float:
+        """Scalar grid charge less the house load the grid carries anyway.
+
+        The scalar balance counts the whole house load as battery drain, but
+        the load above the fleet's discharge power comes from the grid. The
+        first published call keeps the uncapped figures under ``scalar_*``
+        keys, so the plan builder, which runs more than once per decision,
+        nets them once instead of again on every rebuild. A floor deficit is
+        a SOC gap, not load, and a weekly full charge fills the gap to 100%,
+        so neither shrinks.
+        """
+        def number(key: str, fallback: str) -> float:
+            value = decision_data.get(key, decision_data.get(fallback, 0.0))
+            try:
+                value = float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+            return value if math.isfinite(value) else 0.0
+
+        planned = max(0.0, number(
+            "scalar_planned_grid_charge_kwh", "planned_grid_charge_kwh"
+        ))
+        deficit = number("scalar_energy_deficit_kwh", "energy_deficit_kwh")
+        carried = max(0.0, float(carried_kwh or 0.0))
+        weekly_fn = getattr(self._controller, "_weekly_full_charge_pending", None)
+        if (
+            carried <= 1e-9
+            or getattr(self._controller, "_tempo_charge_active", False)
+            or (callable(weekly_fn) and weekly_fn())
+        ):
+            netted_planned, netted_deficit = planned, deficit
+        else:
+            try:
+                floor = max(
+                    0.0, float(decision_data.get("floor_deficit_kwh") or 0.0)
+                )
+            except (TypeError, ValueError):
+                floor = 0.0
+            netted_deficit = max(deficit - carried, min(deficit, floor))
+            # The stored target was already capped by battery room. Remove
+            # grid-carried demand from the raw deficit before applying that
+            # cap, otherwise a 10 kWh deficit / 4 kWh room / 5 kWh carried
+            # would incorrectly cancel the whole charge.
+            netted_planned = min(planned, max(0.0, netted_deficit, floor))
+        if publish:
+            decision_data.setdefault("scalar_planned_grid_charge_kwh", planned)
+            decision_data.setdefault("scalar_energy_deficit_kwh", deficit)
+            scalar_should = decision_data.setdefault(
+                "scalar_should_charge", bool(decision_data.get("should_charge"))
+            )
+            decision_data["planned_grid_charge_kwh"] = netted_planned
+            decision_data["energy_deficit_kwh"] = netted_deficit
+            decision_data["should_charge"] = bool(
+                scalar_should and netted_deficit > 1e-9
+            )
+        return netted_planned
+
+    def _planning_coordinators(self) -> list[Any]:
+        """Batteries the planner sizes for: with data, not manually owned."""
+        owned = getattr(self._controller, "_is_battery_manual_owned", None)
+        return [
+            c for c in getattr(self._controller, "coordinators", None) or []
+            if c.data and not (callable(owned) and owned(c))
+        ]
+
+    def _net_scalar_grid_carried_load(
+        self,
+        decision_data: dict[str, Any],
+        *,
+        now: datetime,
+        fallback_kwh: float = 0.0,
+    ) -> float:
+        """Net the load above the discharge power from a scalar decision.
+
+        For paths with no interval plan (no consumption profile, Real-Time
+        Price): the carried load is estimated at the average rate over the
+        scalar horizon. Publishes the netted figures into ``decision_data``.
+        """
+        scalar_end = self._scalar_horizon_end(
+            decision_data, now=now, default=self.energy_horizon_end(now)
+        )
+        scalar_hours = max(0.0, (scalar_end - now).total_seconds() / 3600.0)
+        remaining_kwh = decision_data.get("remaining_consumption_kwh")
+        solar_kwh = decision_data.get("solar_available_to_battery_kwh", 0.0)
+        if isinstance(remaining_kwh, (int, float)):
+            grid_carried_kwh = self._grid_carried_load_without_profile(
+                remaining_kwh, scalar_hours, solar_kwh
+            )
+        else:
+            grid_carried_kwh = self._grid_carried_load_without_profile(
+                float(decision_data.get("avg_consumption_kwh", 0.0) or 0.0),
+                24.0,
+                solar_kwh,
+            )
+        scalar_kwh = float(decision_data.get(
+            "scalar_planned_grid_charge_kwh",
+            decision_data.get("planned_grid_charge_kwh", fallback_kwh),
+        ) or 0.0)
+        netted_kwh = self._net_grid_carried_load(
+            decision_data, grid_carried_kwh, publish=True
+        )
+        # What actually came off the total (a floor gap stays whole).
+        decision_data["grid_carried_load_kwh"] = round(
+            max(0.0, scalar_kwh - netted_kwh), 3
+        )
+        return netted_kwh
+
+    def _grid_carried_load_without_profile(
+        self, consumption_kwh: float, hours: float, solar_kwh: float = 0.0
+    ) -> float:
+        """Load above the discharge power when no interval shape is known.
+
+        ``load - solar - limit x hours`` never overstates it: per interval the
+        carried load is at least that interval's share, and a peaky load or
+        solar that misses the night only adds to it.
+        """
+        hours = max(0.0, float(hours or 0.0))
+        if hours <= 0.0:
+            return 0.0
+        limit_w = self._fleet_discharge_limit_w(self._planning_coordinators())
+        if limit_w is None:
+            return 0.0
+        return max(
+            0.0,
+            max(0.0, float(consumption_kwh or 0.0))
+            - max(0.0, float(solar_kwh or 0.0))
+            - limit_w / 1000.0 * hours,
+        )
+
     def _build_chronological_plan(
         self,
         *,
@@ -3189,6 +3477,8 @@ class PricingManager:
                     if held_until is not None and start < held_until
                     else consumption[index],
                     solar[index],
+                    house_load_kwh=consumption[index],
+                    house_solar_kwh=solar[index],
                 )
                 for index, (start, end) in enumerate(boundaries)
             ]
@@ -3253,6 +3543,19 @@ class PricingManager:
                 c for c in self._controller.coordinators
                 if c.data and not self._controller._is_battery_manual_owned(c)
             ]
+            discharge_limit_w = self._fleet_discharge_limit_w(eligible)
+            grid_carried_kwh = 0.0
+            if discharge_limit_w is not None:
+                uncapped = intervals
+                intervals = cap_battery_drain(intervals, discharge_limit_w / 1000.0)
+                scalar_end = self._scalar_horizon_end(
+                    decision_data, now=now, default=horizon_end
+                )
+                grid_carried_kwh = max(0.0, sum(
+                    before.consumption_kwh - after.consumption_kwh
+                    for before, after in zip(uncapped, intervals)
+                    if before.end <= scalar_end
+                ))
             total_capacity = sum(
                 float(c.data.get("battery_total_energy", 0) or 0)
                 for c in eligible
@@ -3285,13 +3588,14 @@ class PricingManager:
             # 100% while a weekly full charge is pending, so the plan may size
             # the cheap slots for the whole cycle instead of stopping at max_soc.
             ceiling = getattr(self._controller, "_charge_ceiling_soc", None)
-            headroom = sum(
+            room_kwh = [
                 max(0.0, (
                     (float(ceiling(c)) if callable(ceiling) else float(c.max_soc))
                     - float(c.data.get("battery_soc", 0) or 0)
                 ) / 100.0 * float(c.data.get("battery_total_energy", 0) or 0))
                 for c in eligible
-            )
+            ]
+            headroom = sum(room_kwh)
             weekly_pending = getattr(
                 self._controller, "_weekly_full_charge_pending", None
             )
@@ -3344,7 +3648,14 @@ class PricingManager:
             deadlines = build_energy_deadlines(
                 intervals, usable, usable_capacity_kwh=usable + headroom
             )
-            required = max(0.0, float(decision_data.get("planned_grid_charge_kwh", 0.0) or 0.0))
+            scalar_required = max(0.0, float(decision_data.get(
+                "scalar_planned_grid_charge_kwh",
+                decision_data.get("planned_grid_charge_kwh", 0.0),
+            ) or 0.0))
+            required = self._net_grid_carried_load(
+                decision_data, grid_carried_kwh, publish=not diagnostic_only
+            )
+            grid_carried_kwh = max(0.0, scalar_required - required)
             # Only guaranteed-floor energy may skip the arbitrage margin (#724):
             # the reactive under-floor gap beyond the ordinary deficit, or the
             # planner's floor requirement beyond ordinary pre-sunrise depletion.
@@ -3462,6 +3773,52 @@ class PricingManager:
                 self._contracted_charge_ceiling(),
                 max(0.0, float(self._controller.max_charge_capacity)),
             ) / 1000.0
+            # Battery/phase limits and unequal stop targets can make the
+            # effective rate much lower than the sum of inverter nameplates.
+            fleet_kw = self._fleet_charge_power_kw(
+                eligible, room_kwh,
+                min(headroom, max([required] + [
+                    item.required_cumulative_kwh
+                    for item in deadlines if control_extension
+                ])),
+                now=now, slots=slots,
+            )
+            if fleet_kw is not None:
+                power_kw = min(power_kw, fleet_kw)
+            phase_shares = getattr(self, "_planning_phase_shares", None)
+            if (
+                phase_shares is not None
+                and getattr(self._controller, "predictive_charging_mode", None)
+                == PREDICTIVE_MODE_TIME_SLOT
+            ):
+                from .physical_limits import apply_phase_charge_capacity
+
+                # Full-charge/floor owners retain their targets. Ordinary HC
+                # plans stop each phase at its own original energy need.
+                budget_shares = None
+                if (
+                    sum(phase_shares.values()) > 1e-9
+                    and len(slots) == 1
+                    and slots[0].start <= now < slots[0].end
+                    # Future room belongs to the chronological trajectory.
+                    # A target based on SOC now must never spend a budget in
+                    # a future/PV-clipped window before that charge is chosen.
+                    and not any(
+                        item.start < slots[0].end
+                        and item.solar_kwh > item.consumption_kwh + 1e-9
+                        for item in intervals
+                    )
+                    and not decision_data.get("floor_active")
+                    and not getattr(self._controller, "_tempo_charge_active", False)
+                    and not (callable(weekly_pending) and weekly_pending())
+                ):
+                    budget_shares = [phase_shares[c] for c in eligible]
+                self._planning_phase_budget_active = budget_shares is not None
+                intervals = apply_phase_charge_capacity(
+                    intervals, getattr(self, "_planning_charge_segments", ()),
+                    target_shares=budget_shares, power_kw=power_kw,
+                    grid_ceiling_kw=self._contracted_charge_ceiling() / 1000.0,
+                )
             # Value deadline energy against the import it displaces (#662)
             # where the arbitrage margin is on (zero means off), and only in
             # Dynamic Pricing: Time Slot prices are synthetic.
@@ -3502,6 +3859,7 @@ class PricingManager:
                     grid_carries_load_while_charging=not (
                         callable(weekly_pending) and weekly_pending()
                     ),
+                    grid_ceiling_kw=self._contracted_charge_ceiling() / 1000.0,
                 )
             )
             plan = evaluation.plan
@@ -3521,6 +3879,12 @@ class PricingManager:
             decision_data.update({
                 "chronological_planning_active": not diagnostic_only,
                 "chronological_source": forecast.source,
+                "battery_discharge_limit_w": (
+                    None if discharge_limit_w is None else round(discharge_limit_w)
+                ),
+                "grid_carried_load_kwh": round(grid_carried_kwh, 3),
+                "battery_charge_power_w": round(power_kw * 1000.0),
+                "phase_charge_limits_w": dict(getattr(self, "_phase_charge_limits", {})),
                 "solar_timeline_source": solar_source,
                 "solar_forecast_original_source": solar_input.original_source,
                 "solar_forecast_conversion": solar_input.conversion,
@@ -3724,6 +4088,9 @@ class PricingManager:
         """Apply the active configured-window quota to a Time Slot decision."""
         controller = self._controller
         controller._active_time_slot_quota_kwh = None
+        decision_data.pop("phase_charge_energy_targets_kwh", None)
+        decision_data.pop("phase_charge_energy_requested_kwh", None)
+        decision_data.pop("phase_charge_shortfall_kwh", None)
         horizon_end = decision_data.get("energy_horizon_end")
         if not isinstance(horizon_end, datetime):
             horizon_end = self.energy_horizon_end(now)
@@ -3750,12 +4117,34 @@ class PricingManager:
         if plan is None:
             return decision_data
 
-        controller._time_slot_chronological_plan = plan
         quota = sum(
             allocation.planned_battery_kwh
             for allocation in plan.allocations
             if allocation.slot.start <= now < allocation.slot.end
         )
+        planned_quota = quota
+        quota = self._bound_phase_time_slot_quota(
+            quota, now=now, candidates=candidates, decision_data=decision_data,
+        )
+        phase_shortfall = max(0.0, planned_quota - quota)
+        if phase_shortfall > 1e-9:
+            # Expose the same executable amount in the plan and the active
+            # quota; diagnostics must not keep an optimistic fleet allocation.
+            plan = replace(
+                plan,
+                allocations=[
+                    replace(allocation, planned_battery_kwh=allocation.planned_battery_kwh * quota / planned_quota)
+                    if allocation.slot.start <= now < allocation.slot.end else allocation
+                    for allocation in plan.allocations
+                ],
+                allocated_kwh=max(0.0, plan.allocated_kwh - phase_shortfall),
+                total_shortfall_kwh=plan.total_shortfall_kwh + phase_shortfall,
+            )
+            decision_data["total_shortfall_kwh"] = round(
+                float(decision_data.get("total_shortfall_kwh", 0.0) or 0.0)
+                + phase_shortfall, 3,
+            )
+        controller._time_slot_chronological_plan = plan
         decision_data["aggregate_should_charge"] = aggregate_should_charge
         decision_data["time_slot_chronological_active"] = True
         decision_data["active_slot_energy_target_kwh"] = round(quota, 3)
@@ -3779,7 +4168,12 @@ class PricingManager:
     ) -> None:
         """Build today's Time Slot balance and any remaining-window plan."""
         controller = self._controller
-        if getattr(controller, "_time_slot_chronological_preview_date", None) == now.date():
+        if self._configuration_replan_settling():
+            return
+        if (
+            getattr(controller, "_time_slot_chronological_preview_date", None) == now.date()
+            and not getattr(controller, "_dp_config_dirty", False)
+        ):
             return
         evaluation_start = now.replace(
             hour=0, minute=5, second=0, microsecond=0
@@ -3800,7 +4194,12 @@ class PricingManager:
             and read_solar_forecast_kwh(self._hass, controller) is None
         ):
             return
+        generation = getattr(controller, "_dp_config_generation", 0)
         decision_data = await self._current_horizon_grid_charging_decision()
+        if generation != getattr(controller, "_dp_config_generation", 0):
+            # A config listener may run during forecast/recorder I/O. Leave
+            # the newer dirty revision pending and do not publish this preview.
+            return
         decision_data = self._apply_time_slot_chronological_plan(
             decision_data,
             now=now,
@@ -3831,6 +4230,7 @@ class PricingManager:
         })
         controller._last_decision_data = decision_data
         controller._time_slot_chronological_preview_date = now.date()
+        controller._dp_config_dirty = False
         if float(decision_data.get("deadline_shortfall_kwh", 0.0) or 0.0) > 0:
             await self._send_predictive_charging_notification(
                 decision_data=decision_data
@@ -4154,13 +4554,26 @@ class PricingManager:
             # No consumption profile, so no plan trims the load the grid
             # carries while the slots charge (#785). ponytail: the night load
             # is taken as the daily average / 24; the profile replaces this.
+            night_load_kw = (
+                float(decision_data.get("avg_consumption_kwh", 0.0) or 0.0) / 24.0
+            )
+            # Nor the load above the discharge power, which the battery never
+            # covers: net it from the scalar total at the average rate.
+            netted_kwh = self._net_scalar_grid_carried_load(
+                decision_data, now=eval_now, fallback_kwh=deficit_kwh
+            )
+            deficit_charging_needed = bool(decision_data.get("should_charge", False))
+            limit_w = self._fleet_discharge_limit_w(self._planning_coordinators())
             planned = calculations.net_of_load_carried_by_grid(
-                float(decision_data.get("planned_grid_charge_kwh", deficit_kwh) or 0.0),
+                netted_kwh,
                 min(
                     self._contracted_charge_ceiling(),
                     max(0.0, float(self._controller.max_charge_capacity)),
                 ) / 1000.0,
-                float(decision_data.get("avg_consumption_kwh", 0.0) or 0.0) / 24.0,
+                # Only the drain the battery would have covered is avoided.
+                night_load_kw
+                if limit_w is None
+                else min(night_load_kw, limit_w / 1000.0),
             )
             decision_data["planned_grid_charge_kwh"] = planned
             deficit_hours_needed = calculations.calculate_charging_hours_needed(
@@ -5754,15 +6167,25 @@ class PricingManager:
         weekly_gap_kwh = (
             weekly_gap(coordinators_with_data) if callable(weekly_gap) else 0.0
         )
+        load_deficit_kwh = max(
+            0.0,
+            remaining_consumption_kwh - usable_now_kwh - remaining_solar_kwh,
+        )
+        scalar_evening_deficit_kwh = max(weekly_gap_kwh, load_deficit_kwh)
+        scalar_evening_charge_kwh = calculations.calculate_planned_grid_charge_kwh(
+            scalar_evening_deficit_kwh,
+            energy_to_full_kwh,
+        )
+        # The load above the batteries' discharge power comes from the grid,
+        # not from the battery. Here, before the plan exists, it is taken at
+        # the average rate (never overstated); the plan below nets its exact,
+        # per-interval figure from the scalar values instead.
+        grid_carried_kwh = self._grid_carried_load_without_profile(
+            remaining_consumption_kwh, remaining_window_hours, remaining_solar_kwh
+        )
         evening_deficit_kwh = min(
             energy_to_full_kwh,
-            max(
-                weekly_gap_kwh,
-                max(
-                    0.0,
-                    remaining_consumption_kwh - usable_now_kwh - remaining_solar_kwh,
-                ),
-            ),
+            max(weekly_gap_kwh, max(0.0, load_deficit_kwh - grid_carried_kwh)),
         )
         planned_evening_charge_kwh = calculations.calculate_planned_grid_charge_kwh(
             evening_deficit_kwh,
@@ -5818,6 +6241,10 @@ class PricingManager:
         decision_data["should_charge"] = True
         decision_data["energy_deficit_kwh"] = evening_deficit_kwh
         decision_data["planned_grid_charge_kwh"] = planned_evening_charge_kwh
+        decision_data["scalar_should_charge"] = True
+        decision_data["scalar_energy_deficit_kwh"] = scalar_evening_deficit_kwh
+        decision_data["scalar_planned_grid_charge_kwh"] = scalar_evening_charge_kwh
+        decision_data["grid_carried_load_kwh"] = round(grid_carried_kwh, 3)
         # Same arbitrage-aware ceiling as the main evaluation: a deficit top-up
         # must not buy energy that costs more than it can displace later.
         price_ceiling = self._controller.max_price_threshold
@@ -5837,6 +6264,8 @@ class PricingManager:
         )
         selected_energy_kwh: dict = {}
         if chronological_plan is not None:
+            evening_deficit_kwh = float(decision_data.get("energy_deficit_kwh", evening_deficit_kwh) or 0.0)
+            planned_evening_charge_kwh = float(decision_data.get("planned_grid_charge_kwh", planned_evening_charge_kwh) or 0.0)
             selected = [
                 allocation.slot
                 for allocation in chronological_plan.allocations
@@ -6383,10 +6812,16 @@ class PricingManager:
         # Phase 2.65: Re-plan when a knob the balance is built on moved — a max
         # or min SOC limit, a predictive margin, the guaranteed floor. The flag
         # is set once by the config-entry listener and consumed here, so no
-        # cooldown or daily cap is needed: a user cannot press faster than they
-        # can turn a dial. A cycle that already ran one of the triggers above
-        # leaves the flag for the next one rather than evaluating twice.
-        elif getattr(self._controller, "_dp_config_dirty", False):
+        # daily cap is needed. It waits until the settings have been still for
+        # CONFIG_REPLAN_SETTLE_S: one click can write twice (a manual threshold
+        # switch stores its starting value too) and a slider writes as it moves,
+        # and each re-plan used to be its own full evaluation. A cycle that
+        # already ran one of the triggers above leaves the flag for the next one
+        # rather than evaluating twice.
+        elif (
+            getattr(self._controller, "_dp_config_dirty", False)
+            and not self._configuration_replan_settling()
+        ):
             self._controller._dp_config_dirty = False
             _LOGGER.info("Dynamic pricing: configuration changed — re-evaluating")
             await self._evaluate_dynamic_pricing(
@@ -6750,6 +7185,17 @@ class PricingManager:
     # REAL-TIME PRICE: reactive charging based on current price every cycle
     # =========================================================================
 
+    async def _realtime_decision(self) -> dict:
+        """Current-horizon decision, less the load the grid carries anyway.
+
+        Real-Time Price has no interval plan, so without this it sized the
+        charge for the whole house load even above the discharge power.
+        """
+        decision_data = await self._current_horizon_grid_charging_decision()
+        if decision_data.get("should_charge"):
+            self._net_scalar_grid_carried_load(decision_data, now=self._now())
+        return decision_data
+
     async def handle_realtime_price_predictive_charging(self) -> None:
         """Handle predictive charging in real-time price mode (called every 2.5s).
 
@@ -6821,7 +7267,7 @@ class PricingManager:
                 )
             else:
                 # Evaluate whether charging is actually needed before starting
-                decision_data = await self._current_horizon_grid_charging_decision()
+                decision_data = await self._realtime_decision()
                 self._controller._last_decision_data = decision_data
                 if decision_data["should_charge"]:
                     self._controller._realtime_price_charging = True
@@ -6868,6 +7314,15 @@ class PricingManager:
     # =========================================================================
     # TIME SLOT: predictive charging handler
     # =========================================================================
+
+    def _configuration_replan_settling(self) -> bool:
+        """Coalesce planning edits without delaying runtime limits or stop gates."""
+        changed_at = getattr(self._controller, "_dp_config_dirty_at", 0.0)
+        return bool(
+            getattr(self._controller, "_dp_config_dirty", False)
+            and changed_at is not None
+            and monotonic() - changed_at < CONFIG_REPLAN_SETTLE_S
+        )
 
     async def handle_time_slot_predictive_charging(self) -> None:
         """Handle predictive charging in time slot mode (extracted from main loop)."""
@@ -6930,6 +7385,7 @@ class PricingManager:
             )
             previous_window = getattr(self._controller, "_time_slot_active_window", None)
             window_changed = window_key is not None and window_key != previous_window
+            entering_window = window_key is not None and previous_window is None
             if window_key is not None:
                 self._controller._time_slot_active_window = window_key
             is_initial_eval = (
@@ -7025,6 +7481,12 @@ class PricingManager:
                 abs(current_avg_soc - self._controller.last_evaluation_soc) >= SOC_REEVALUATION_THRESHOLD
             )
 
+            if self._configuration_replan_settling() and not entering_window:
+                # Do not return from the handler: an existing charge still
+                # receives its SOC/import/phase limits below on every cycle.
+                # Window entry and the outside-window cutoff stay immediate.
+                should_reevaluate = False
+
             if should_reevaluate:
                 if forecast_moved:
                     self._controller._dp_solar_forecast_reeval_at = now
@@ -7102,7 +7564,15 @@ class PricingManager:
                             forecast_unavailable_elapsed_s,
                         )
 
+                generation = getattr(self._controller, "_dp_config_generation", 0)
                 decision_data = await self._current_horizon_grid_charging_decision()
+                if generation != getattr(self._controller, "_dp_config_generation", 0):
+                    # Discard a result overtaken by a setting edit, preserving
+                    # last_evaluation_soc=None and the new dirty generation.
+                    # The prior charge still gets current protection limits.
+                    if self._controller.grid_charging_active:
+                        await self._controller._handle_predictive_grid_charging()
+                    return
 
                 # A provider can change state between the pre-check above and
                 # the actual balance decision. Apply the same bounded retry to
@@ -7152,6 +7622,7 @@ class PricingManager:
                 self._controller.grid_charging_active = decision_data["should_charge"]
                 self._controller.last_evaluation_soc = current_avg_soc
                 self._controller._time_slot_last_evaluation_at = now
+                self._controller._dp_config_dirty = False
                 self._controller._last_eval_peak_shaving_held = peak_shaving_held
                 self._controller._last_decision_data = decision_data
                 # Arms the forecast trigger on the slot's first evaluation and

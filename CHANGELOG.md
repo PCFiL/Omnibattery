@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.6.6] - 2026-11-18
+
+### Upstream 1.6.1 backports for the PCFiL fork
+
+Reviewed against `ffunes/Omnibattery` main at `2e7156f`. These four batches
+retain the fork's AROME adapter, complete 22:00-06:00 Europe/Paris windows,
+per-phase SOC holds, Tempo red-day preparation, weekly charging, deep-SOC
+recovery, manual ownership and EV charging pause.
+
+- **A — Recorder and restoration:** exclude the daily timeline's live
+  attributes from Recorder; preserve immediate interval notifications inside
+  refresh batches. Restore copied Home Assistant Stores before enabling a
+  recreated entry, including phase learning and predictive SOC hold data.
+  Adapted from upstream `5b435fca`, `c39629c7` and `e7ccc781`.
+- **B — Failure recovery and reloads:** release failed predictive ownership,
+  retry a valid plan on a subsequent authorized cycle and keep normal control
+  and phase interlocks running. Isolate battery disconnect failures and each
+  final persistence step, including the local phase-demand profile.
+  Adapted from upstream `b3cc3210` and `e8cb4cc7`.
+- **C — Solar performance and configuration changes:** index forecast periods
+  and cache profile/date calculations without replacing dated AROME inputs.
+  Replan when relevant local settings change, including weekly hours and phase
+  power limits. Coalesce planning edits for three seconds while live control
+  and the 06:00 cutoff continue immediately. Generation checks discard a plan
+  overtaken by another edit during an asynchronous calculation. Preserve the
+  `_stdlib_time` alias required by the integration's `time` platform.
+  Adapted from upstream `bf291af4`, `e9cf00d9`, `60f93add`, `5b0305e1`
+  and `5bc0b7d6`.
+- **D — Physical planning limits:** account for batteries that reach their
+  targets at different times, household load sharing the import ceiling,
+  attainable per-phase charging energy and the fleet's discharge limit.
+  Keep actual household demand and PV separate from battery-only interval
+  transforms, so holding a battery idle cannot erase the load used to size
+  charging slots. Preserve each phase's own energy need and report an
+  unattainable part instead of shifting it to another phase.
+  Adapted from upstream `583ccf4b`, `051aca23`, `c5e4bd9f`, `903f68c7`,
+  `56ed49e9`, `b97d7cde` and `1fb5bdf7` with fork-specific safeguards.
+
+### Validation
+
+- Add an independent upstream-backports CI suite alongside the complete unit,
+  Home Assistant restoration, historical, phase-transition and nightly suites.
+- Exercise real integration modules with simulated device I/O. Regression
+  coverage includes unequal phase needs, import headroom, preserved idle/PV
+  load, settings changed during a calculation and recovery after an exception.
+- Refresh scoped legacy fixtures for persistent SOC holds, consumption cache
+  state and the standard-library clock alias; keep existing safety assertions.
+
 ## [1.5.0] - 2026-10-04
 
 ### Added

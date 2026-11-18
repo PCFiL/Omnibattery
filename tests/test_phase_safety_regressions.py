@@ -3,6 +3,7 @@
 No battery is contacted: the production planner/runtime use explicit fake
 coordinators. A command ACK is not evidence of physical AC power reaching zero.
 """
+from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -10,7 +11,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from homeassistant.util import dt as dt_util
 
-from custom_components.omnibattery.control import phase_runtime
+from custom_components.omnibattery.control import phase_runtime, predictive_soc_hold
 from custom_components.omnibattery.control.per_phase import PerPhasePlanner, PhaseAssignment
 from custom_components.omnibattery.control.phase_runtime import PhaseRuntime
 from tests.test_phase_live_safety import FakeController, meter
@@ -18,6 +19,22 @@ from tests.test_phase_live_safety import FakeController, meter
 
 @pytest.fixture
 def clock(monkeypatch):
+    # These runtime tests predate restart-safe SOC holds. Keep the production
+    # hold manager active, replacing only HA's disk storage for the lightweight
+    # FakeController. Snapshots are detached just like a serialized Store.
+    stored = {}
+
+    class MemoryStore:
+        def __init__(self, hass, version, key):
+            self.key = key
+
+        async def async_load(self):
+            return deepcopy(stored.get(self.key))
+
+        async def async_save(self, data):
+            stored[self.key] = deepcopy(data)
+
+    monkeypatch.setattr(predictive_soc_hold, "Store", MemoryStore)
     seconds = [100.0]
     monkeypatch.setattr(phase_runtime, "monotonic", lambda: seconds[0])
     monkeypatch.setattr(dt_util, "now", lambda: datetime(
@@ -28,6 +45,7 @@ def clock(monkeypatch):
 
 def forced_controller(mode):
     ctl = FakeController(300)
+    ctl.config_entry.entry_id = "phase_safety_regressions"
     ctl.coordinators[0].data = {"battery_soc": 15}
     ctl._tempo_charge_active = mode == "tempo"
     ctl.weekly_full_charge_enabled = mode == "weekly"
@@ -53,6 +71,9 @@ async def test_global_meter_loss_stops_after_any_nonzero_attempt(clock, mode, ac
     ctl = forced_controller(mode)
     runtime = PhaseRuntime(ctl)
     await runtime.run()  # Startup zero at t=100.
+    if mode == "predictive":
+        # The real reserve is present while the meter-loss stop is tested.
+        assert runtime.predictive_soc_hold_status["L2"]["target_soc"] == 65
     clock[0] = 106
     ctl.ack = acknowledged
     await runtime.run()

@@ -1200,6 +1200,7 @@ class ChargeDischargeController:
         self._dynamic_pricing_evaluated_date = None
         self._current_price_slot_active = False
         self._dp_eval_retry_count = 0  # Retry counter if tomorrow prices not available at 23:00
+        self._predictive_dispatch_errors = 0  # Consecutive failed predictive steps
         self._dp_pre_evaluated_slots: dict = {}  # slot.start (datetime) → should_charge (bool)
         self._dp_pre_evaluated_purposes: dict = {}  # slot.start → effective typed purpose
         self._dp_completed_slots: set = set()  # slot.start values completed in this plan
@@ -1228,7 +1229,9 @@ class ChargeDischargeController:
         self._dp_solar_forecast_reeval_at = None  # last forecast-driven re-evaluation (cooldown)
         self._dp_solar_forecast_reeval_count = 0  # forecast-driven re-evaluations today (daily cap)
         self._dp_solar_forecast_reeval_date = None  # day that cap belongs to (time slot has no daily reset)
-        self._dp_config_dirty = False  # a balance knob moved; rebuild on the next DP cycle
+        self._dp_config_dirty = False  # planning inputs changed; runtime protections stay live
+        self._dp_config_dirty_at = 0.0
+        self._dp_config_generation = 0
         self._predictive_balance_fingerprint = None  # seeded once the coordinators exist
         # Smart pre-discharge is runtime-only.  Plans are rebuilt after restart;
         # no plan or override is persisted in Home Assistant storage.
@@ -3180,22 +3183,108 @@ class ChargeDischargeController:
         that also land in entry data — shadow selects, manual force mode,
         capability detection at startup — do not. Battery capacity is telemetry,
         not a setting, so it is deliberately absent.
+
+        Both what the plan buys (the balance knobs) and which slots it picks
+        (charge ceiling, arbitrage margin, round-trip efficiency, the
+        pre-discharge plan) count, as does the weekly full charge: a moved day
+        or a switched-off run must not leave the old weekly slots booked. The
+        efficiency is the configured value; the measured one drifts on its own.
+
+        So do the switches and limits the evaluation itself reads: the
+        Discharge Reserve (it decides whether stored energy is kept for dearer
+        hours when slots are picked), peak shaving and the contracted power
+        (they cap the charge rate the slots are sized with), the system power
+        limits, Vacation Mode (the consumption forecast), Charge Delay, and the
+        Smart Pre-Discharge and Negative-Price Charging switches, whose slots
+        would otherwise stay in the calendar after switching off. The local
+        weekly hours, charge windows and phase import/fuse limits count too.
+        Configured battery power limits are settings, whereas live temperature,
+        measured power and SOC remain telemetry and never churn this fingerprint.
+
+        Settings read live every cycle (discharge floor, minimum savings,
+        High-Price Sale) need no re-plan and stay out.
+        ``test_replan_inputs.py`` sorts every config-backed controller setting
+        into one of these groups.
         """
+
+        def _rounded(value):
+            return None if value is None else round(float(value), 4)
+
+        def _freeze(value):
+            # Config dictionaries can be edited in place. Keep an immutable
+            # value snapshot so the next listener can detect that change.
+            if isinstance(value, dict):
+                return tuple(sorted(
+                    (str(key), _freeze(item)) for key, item in value.items()
+                ))
+            if isinstance(value, (list, tuple)):
+                return tuple(_freeze(item) for item in value)
+            return value
+
+        data = getattr(getattr(self, "config_entry", None), "data", {})
+        local_planning_keys = (
+            CONF_CHARGING_TIME_SLOT,
+            "weekly_full_charge_start", "weekly_full_charge_end",
+            "tempo_phase_import_limit_w", CONF_THREE_PHASE_ENABLED,
+            CONF_PHASE_1_CURRENT_SENSOR, CONF_PHASE_2_CURRENT_SENSOR,
+            CONF_PHASE_3_CURRENT_SENSOR,
+            "phase_1_fuse_size", "phase_2_fuse_size", "phase_3_fuse_size",
+        )
+        phase_channels = tuple(
+            tuple(channel.get(key) for key in (
+                "phase", "battery", "grid_sensor", "enabled", "target_w"
+            ))
+            for channel in data.get("phase_pd_channels", [])
+            if isinstance(channel, dict)
+        )
+
         return (
             round(float(self._predictive_safety_margin_kwh or 0.0), 3),
             round(float(self._predictive_min_soc_floor or 0.0), 3),
             bool(self._predictive_min_soc_floor_enabled),
+            _rounded(getattr(self, "max_price_threshold", None)),
+            _rounded(getattr(self, "min_arbitrage_margin", None)),
+            _rounded(getattr(self, "round_trip_efficiency", None)),
+            _rounded(getattr(self, "negative_injection_threshold", None)),
+            _rounded(getattr(self, "predischarge_reserve_soc", None)),
+            bool(getattr(self, "weekly_full_charge_enabled", False)),
+            getattr(self, "weekly_full_charge_day", None),
+            bool(getattr(self, "discharge_reserve_enabled", False)),
+            bool(getattr(self, "capacity_protection_enabled", False)),
+            _rounded(getattr(self, "capacity_protection_limit", None)),
+            _rounded(getattr(self, "capacity_protection_soc_threshold", None)),
+            _rounded(getattr(self, "max_contracted_power", None)),
+            bool(getattr(self, "enable_system_power_limits", False)),
+            _rounded(getattr(self, "system_max_charge_power", None)),
+            _rounded(getattr(self, "system_max_discharge_power", None)),
+            bool(getattr(self, "vacation_mode_enabled", False)),
+            bool(getattr(self, "charge_delay_enabled", False)),
+            bool(getattr(self, "smart_predischarge_enabled", False)),
+            bool(getattr(self, "negative_price_charging_enabled", False)),
+            bool(getattr(self, "temp_charge_limit_enabled", False)),
+            _rounded(getattr(self, "_temp_charge_limit_c", None)),
+            _rounded(getattr(self, "_temp_charge_limit_band_c", None)),
+            _rounded(getattr(self, "_temp_charge_limit_floor_pct", None)),
+            bool(getattr(self, "temp_limit_apply_discharge", False)),
+            _freeze(getattr(self, "charging_time_slots", ())),
+            tuple((key, _freeze(data.get(key))) for key in local_planning_keys),
+            phase_channels,
             tuple(
                 (
                     getattr(c, "device_key", None),
                     getattr(c, "min_soc", None),
                     getattr(c, "max_soc", None),
+                    getattr(c, "configured_max_charge_power", None),
+                    getattr(c, "configured_max_discharge_power", None),
+                    getattr(c, "user_max_charge_power", None),
+                    getattr(c, "user_max_discharge_power", None),
+                    getattr(c, "battery_phase", None),
                 )
                 for c in self.coordinators
             ),
         )
 
-    def invalidate_predictive_plan(self, reason: str) -> None:
+    def invalidate_predictive_plan(self, reason: str, *, immediate: bool = False) -> None:
         """Force the next control cycle to rebuild the predictive charge plan.
 
         A plan decided against grid charging on the old value of a knob the user
@@ -3206,9 +3295,15 @@ class ChargeDischargeController:
         Time slot re-enters its own initial-evaluation path by clearing the SOC
         reference; dynamic pricing consumes the flag on its next cycle. Real-time
         price re-decides every cycle on its own and needs neither.
+
+        Configuration edits settle before rebuilding. A runtime owner handoff
+        has already discarded the old targets, so it must rebuild in the same
+        cycle; an explicit manual re-evaluation also bypasses that wait.
         """
         self.last_evaluation_soc = None
         self._dp_config_dirty = True
+        self._dp_config_dirty_at = None if immediate else _stdlib_time.monotonic()
+        self._dp_config_generation = getattr(self, "_dp_config_generation", 0) + 1
         _LOGGER.info("Predictive plan invalidated: %s", reason)
 
     def update_pd_parameters(self):
@@ -4135,7 +4230,7 @@ class ChargeDischargeController:
                 self._grid_charging_initialized = False
                 self._predictive_charge_target_soc = None
                 self._phase_predictive_targets = {}
-                self.invalidate_predictive_plan("tempo_charge_ended")
+                self.invalidate_predictive_plan("tempo_charge_ended", immediate=True)
                 # Return control to the normal planner in this same cycle.
                 _LOGGER.info("Tempo: charge window ended, releasing predictive control")
             return False
@@ -4233,7 +4328,8 @@ class ChargeDischargeController:
         self._active_time_slot_quota_kwh = None
         self._reset_predictive_demand_runtime()
         self.invalidate_predictive_plan(
-            f"full_charge_handoff:{previous or 'predictive'}->{owner or 'predictive'}"
+            f"full_charge_handoff:{previous or 'predictive'}->{owner or 'predictive'}",
+            immediate=True,
         )
 
     def _weekly_full_charge_unlocked(self) -> bool:
@@ -6576,6 +6672,25 @@ class ChargeDischargeController:
                     if phase_allocation is not None else None
                 ),
             )
+        phase_targets = decision_data.get("phase_charge_energy_targets_kwh")
+        if (
+            getattr(self, "predictive_charging_mode", None) == PREDICTIVE_MODE_TIME_SLOT
+            and isinstance(phase_targets, dict)
+            and all(c.name in phase_targets for c in gaps)
+            and all(isinstance(v, (int, float)) and math.isfinite(v) and v >= 0
+                    for v in phase_targets.values())
+        ):
+            # The planner already bounded each phase's own share by the
+            # remaining window and its power limit. Re-running the weights
+            # on the smaller fleet quota would assign energy back to the
+            # constrained phase and silently strand the other phases' share.
+            total = sum(phase_targets.values())
+            scale = min(1.0, grid_charge_kwh / total) if total > 0 else 0.0
+            shares = {c: min(gaps[c], phase_targets[c.name] * scale) for c in gaps}
+            self._phase_predictive_allocation["source"] = "phase_physical_limits"
+            self._phase_predictive_allocation["shortfall_kwh"] = decision_data.get(
+                "phase_charge_shortfall_kwh", 0.0
+            )
         self._phase_predictive_allocation["allocated_kwh"] = {
             coord.name: round(kwh, 3) for coord, kwh in shares.items()
         }
@@ -7003,6 +7118,39 @@ class ChargeDischargeController:
         }:
             self._capacity_protection_active = False
             status.update({"active": False, "action": "idle"})
+
+    def _handle_predictive_dispatch_error(self) -> None:
+        """Release a failed predictive step to blockers and normal phase control."""
+        errors = getattr(self, "_predictive_dispatch_errors", 0) + 1
+        self._predictive_dispatch_errors = errors
+        if errors == 1:
+            _LOGGER.exception(
+                "Predictive charging failed; releasing the slot to normal control"
+            )
+        else:
+            _LOGGER.debug(
+                "Predictive charging failed again (%d in a row)", errors, exc_info=True
+            )
+        try:
+            self._clear_predictive_runtime("predictive_error")
+        except Exception:  # noqa: BLE001 - cleanup must not abort control either
+            _LOGGER.debug("Clearing predictive runtime failed", exc_info=True)
+        finally:
+            # The fork's phase writer runs in the outer cycle's finally block.
+            # Even if a manager fails during cleanup, it must not inherit a
+            # live charge claim or stale per-phase targets from the failed plan.
+            # Acquired SOC reserves remain governed by their existing HC hold.
+            self.grid_charging_active = False
+            self._grid_charging_initialized = False
+            self._current_price_slot_active = False
+            self._realtime_price_charging = False
+            self._predictive_charge_target_soc = None
+            self._predictive_deficit_target_soc = None
+            self._phase_predictive_targets = {}
+            self._active_time_slot_quota_kwh = None
+            # A recovered time-slot handler must rebuild its quota rather than
+            # wait for the fork's 15-minute inactive refresh on a failed plan.
+            self.last_evaluation_soc = None
 
     def _clear_predictive_runtime(self, reason: str) -> None:
         """Release all live predictive ownership without unloading the entry.
@@ -10537,23 +10685,24 @@ class ChargeDischargeController:
             self._current_price_slot_active = False
             self._realtime_price_charging = False
         if self.predictive_charging_enabled and not getattr(self, "_tempo_red_peak_active", False):
-            if self.predictive_charging_mode == PREDICTIVE_MODE_DYNAMIC_PRICING:
-                await self._handle_dynamic_pricing_predictive_charging()
-                # Dynamic pricing falls through to normal PD control when not in a slot;
-                # it only returns early when actively charging.
-                if self.grid_charging_active:
-                    return
-            elif self.predictive_charging_mode == PREDICTIVE_MODE_REALTIME_PRICE:
-                await self._handle_realtime_price_predictive_charging()
-                if self.grid_charging_active:
-                    return
+            try:
+                if self.predictive_charging_mode == PREDICTIVE_MODE_DYNAMIC_PRICING:
+                    await self._handle_dynamic_pricing_predictive_charging()
+                elif self.predictive_charging_mode == PREDICTIVE_MODE_REALTIME_PRICE:
+                    await self._handle_realtime_price_predictive_charging()
+                else:
+                    await self._handle_time_slot_predictive_charging()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - control must survive a planner bug
+                # Preserve Tempo/weekly/manual ownership above this dispatch;
+                # only a failed ordinary predictive step is released here.
+                # Blockers and normal control below must still run this cycle.
+                self._handle_predictive_dispatch_error()
             else:
-                # Default: time slot mode
-                await self._handle_time_slot_predictive_charging()
-                # Time slot handler always returns early from its own logic,
-                # so we only reach here when outside the slot (normal PD control).
-                if self.grid_charging_active:
-                    return
+                self._predictive_dispatch_errors = 0
+            if self.grid_charging_active:
+                return
 
         # === Operation blockers: enforce BEFORE deadband / stale early-returns ===
         # Without this guard the deadband and stale-sensor paths could keep a
@@ -12866,6 +13015,15 @@ async def _async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, opened: li
             if (
                 controller.predictive_charging_enabled
                 and not controller.predictive_charging_overridden
+                # The mode handler rebuilds after settings settle. Computing
+                # diagnostics here would repeat the expensive planner for
+                # every slider write before that one coalesced evaluation.
+                and not (
+                    controller._dp_config_dirty
+                    and controller.predictive_charging_mode in (
+                        PREDICTIVE_MODE_TIME_SLOT, PREDICTIVE_MODE_DYNAMIC_PRICING
+                    )
+                )
             ):
                 diagnostic_now = dt_util.now()
                 await controller._pricing_mgr.async_refresh_chronological_diagnostics(
@@ -13079,36 +13237,51 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.error("Error shutting down battery %s: %s", coordinator.name, e)
 
-        # Disconnect from all coordinators
-        await asyncio.gather(*[c.disconnect() for c in coordinators])
+        # One failed disconnect must not skip the other batteries or the final
+        # persistence below, including the fork's per-phase consumption profile.
+        results = await asyncio.gather(
+            *[c.disconnect() for c in coordinators], return_exceptions=True
+        )
+        for coordinator, result in zip(coordinators, results):
+            if isinstance(result, BaseException):
+                _LOGGER.error("Error disconnecting %s: %r", coordinator.name, result)
+
+        controller = data.get("controller")
+
+        async def _persist(label: str, step) -> None:
+            try:
+                await step()
+            except Exception:  # noqa: BLE001 - keep saving the remaining managers
+                _LOGGER.exception("Error saving %s on unload", label)
 
         # Persist hourly balance state
-        controller = data.get("controller")
         if controller and controller._hourly_balance_mgr is not None:
-            await controller._hourly_balance_mgr.async_unload()
+            await _persist("hourly balance", controller._hourly_balance_mgr.async_unload)
 
         # Persist all throttled accumulators (consumption history + grid-at-min-soc,
         # daily solar/home/grid energy totals, household/solar accumulators) so a
         # reload doesn't revert these TOTAL_INCREASING sensors to the last throttled
         # (~5 min) save, which would step their values backwards and spam the log.
         if controller and controller._consumption_tracker is not None:
-            await controller._consumption_tracker.async_save_all()
+            await _persist(
+                "consumption tracker", controller._consumption_tracker.async_save_all
+            )
         if controller and getattr(controller, "_phase_demand_profile", None) is not None:
-            await controller._phase_demand_profile.async_save()
+            await _persist("phase demand profile", controller._phase_demand_profile.async_save)
 
         if controller:
             timeline = getattr(controller, "_daily_operation_timeline", None)
             if timeline is not None:
-                await timeline.async_shutdown()
+                await _persist("daily operation timeline", timeline.async_shutdown)
 
         if unload_ok:
             hass.data[DOMAIN].pop(entry.entry_id, None)
 
-    # Remove the sidebar panel only when no config entries remain.
+    # A failed platform unload keeps the entry, its panel and its services.
     remaining = [
         e for e in hass.config_entries.async_entries(DOMAIN) if e.entry_id != entry.entry_id
     ]
-    if not remaining:
+    if unload_ok and not remaining:
         _async_unregister_frontend_panel(hass)
         hass.services.async_remove(DOMAIN, SERVICE_EXCLUDE_CONSUMPTION_DAYS)
 
