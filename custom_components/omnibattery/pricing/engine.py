@@ -518,6 +518,33 @@ class PricingManager:
             self._controller._slot_entry_time = now
             return 0.0
 
+    @staticmethod
+    def _time_slot_forecast_pending(forecast, now: datetime) -> bool:
+        """Distinguish a missing forecast from a valid zero at sunset.
+
+        At 22:00 AROME's *remaining today* is normally 0 kWh; waiting five
+        minutes then is wrong. Only a genuinely unreadable value needs the
+        unavailable-sensor grace. Around 00:00 a zero can be yesterday's
+        unpublished remainder, unless dated positive periods already prove
+        today's forecast is available.
+        """
+        if forecast is None:
+            return True
+        if now.hour != 0 or forecast.remaining_kwh > 0:
+            return False
+        today = now.astimezone(PARIS).date() if now.tzinfo else now.date()
+        for period in getattr(forecast, "periods", ()) or ():
+            start = getattr(period, "start", None)
+            if not isinstance(start, datetime):
+                continue
+            local = start.astimezone(PARIS) if start.tzinfo else start
+            if (
+                local.date() == today
+                and float(getattr(period, "energy_kwh", 0.0) or 0.0) > 0
+            ):
+                return False
+        return True
+
     def _reset_predictive_demand_runtime(self) -> None:
         """Clear demand-protection state whenever a predictive slot aborts."""
         reset = getattr(self._controller, "_reset_predictive_demand_runtime", None)
@@ -3769,6 +3796,58 @@ class PricingManager:
                     )
                     decision_data["planned_grid_charge_kwh"] = min(required, headroom)
                     decision_data["guaranteed_floor_deadline"] = solar_start_dt.isoformat()
+            phase_minimums = None
+            if (
+                not diagnostic_only
+                and control_extension
+                and slots
+                and getattr(self._controller, "predictive_charging_mode", None)
+                    == PREDICTIVE_MODE_TIME_SLOT
+                and not decision_data.get("floor_active", False)
+                and not getattr(self._controller, "_tempo_charge_active", False)
+                and not (callable(weekly_pending) and weekly_pending())
+            ):
+                # Batteries do not share stored energy across phases. The
+                # aggregate balance may be positive only because L2 is full,
+                # while L3 will run dry tomorrow. Use *mature* phase-local
+                # 06:00-22:00 residual-demand observations to reserve a minimum
+                # for each battery before distributing the global plan.
+                from .physical_limits import learned_phase_daytime_minimums
+
+                phase_minimums = learned_phase_daytime_minimums(
+                    self._controller, eligible, room_kwh, floor_of=floor_of,
+                )
+                if phase_minimums is not None:
+                    phase_required = sum(phase_minimums.values())
+                    decision_data["phase_daytime_minimum_kwh"] = {
+                        battery.name: round(value, 3)
+                        for battery, value in phase_minimums.items()
+                    }
+                    decision_data["phase_daytime_minimum_source"] = (
+                        "learned_net_phase_demand"
+                    )
+                    if phase_required > 1e-6:
+                        # Every daytime reserve must be stored before the
+                        # authorized HC windows end. These are cumulative
+                        # deadlines, not additional energy counted on top of
+                        # the global need; overlapping requirements use max.
+                        charge_deadline = min(
+                            horizon_end, max(slot.end for slot in slots)
+                        )
+                        deadlines.append(EnergyDeadline(
+                            charge_deadline, phase_required, "phase_daytime",
+                        ))
+                        merged_deadlines = []
+                        cumulative = 0.0
+                        for item in sorted(deadlines, key=lambda x: x.deadline):
+                            if item.required_cumulative_kwh > cumulative + 1e-9:
+                                merged_deadlines.append(item)
+                                cumulative = item.required_cumulative_kwh
+                        deadlines = merged_deadlines
+                        required = max(required, phase_required)
+                        decision_data["phase_daytime_deadline"] = (
+                            charge_deadline.isoformat()
+                        )
             power_kw = min(
                 self._contracted_charge_ceiling(),
                 max(0.0, float(self._controller.max_charge_capacity)),
@@ -3785,6 +3864,15 @@ class PricingManager:
             )
             if fleet_kw is not None:
                 power_kw = min(power_kw, fleet_kw)
+            if phase_minimums is not None:
+                from .physical_limits import reserve_phase_daytime_needs
+
+                self._planning_phase_shares = reserve_phase_daytime_needs(
+                    self._controller, eligible, room_kwh,
+                    min(headroom, max([required] + [
+                        item.required_cumulative_kwh for item in deadlines
+                    ])), phase_minimums,
+                )
             phase_shares = getattr(self, "_planning_phase_shares", None)
             if (
                 phase_shares is not None
@@ -7537,14 +7625,11 @@ class PricingManager:
                     # next cycle can retry instead of publishing a misleading
                     # safe-mode notification. Once the existing five-minute
                     # grace expires, the normal conservative fallback is safe.
-                    # A slot that opens on the day boundary (00:00) reads the
-                    # provider's exhausted previous-day remainder for the few
-                    # hundred milliseconds before it republishes the new day, so
-                    # a zero remaining forecast is treated as "not published
-                    # yet" and retried within the same grace.
+                    # A midnight zero may mean the provider has not yet
+                    # published; an evening zero means the sun has set.
                     forecast = read_solar_forecast_kwh(self._hass, self._controller)
-                    forecast_unavailable = (
-                        forecast is None or forecast.remaining_kwh <= 0.0
+                    forecast_unavailable = self._time_slot_forecast_pending(
+                        forecast, now
                     )
                     if forecast_unavailable:
                         forecast_unavailable_elapsed_s = (
@@ -7581,7 +7666,11 @@ class PricingManager:
                 decision_forecast_unavailable = (
                     is_initial_eval
                     and forecast_configured
-                    and not decision_data.get("solar_forecast_kwh")
+                    and self._time_slot_forecast_pending(
+                        read_solar_forecast_kwh(
+                            self._hass, self._controller, update_controller=False
+                        ), now
+                    )
                 )
                 if decision_forecast_unavailable:
                     if not forecast_unavailable:
@@ -7613,6 +7702,8 @@ class PricingManager:
                     decision_data,
                     now=now,
                 )
+                decision_data["time_slot_evaluation_context"] = "active_window"
+                decision_data["time_slot_evaluated_at"] = now
                 # The per-battery target is only recomputed while it is None;
                 # a re-evaluation's new quota otherwise never reached it and
                 # the window kept charging to the slot-entry target.

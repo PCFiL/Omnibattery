@@ -41,7 +41,9 @@ def test_recovery_and_prediction_are_max_not_sum():
     options=setup()
     # A global request allocated to low phase already exceeds the 0.64 kWh floor.
     options["global_budget"] = lambda *args: 1.0
-    options["items"] = [replace(s, demand=(0,0,.1)) if s.start >= options["window"].end else s for s in options["items"]]
+    # Small daytime energy: the individual L3 need stays below the 1 kWh
+    # global budget, so the recovery floor is not added a second time.
+    options["items"] = [replace(s, demand=(0,0,.01)) if s.start >= options["window"].end else s for s in options["items"]]
     result=preview_window(**options)
     assert result["rows"][2]["planned_battery_kwh"] == pytest.approx(1)
     assert result["rows"][2]["soc_target"] == pytest.approx(19.5)

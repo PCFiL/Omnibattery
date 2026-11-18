@@ -23,6 +23,87 @@ def _finite(value, default=None):
     return number if math.isfinite(number) else default
 
 
+def learned_phase_daytime_minimums(controller, coordinators, room_kwh, *, floor_of):
+    """Per-phase HC reserve needed for the next day's net-of-PV demand.
+
+    The 06:00–22:00 residual demand model is already trained on (grid minus
+    battery AC) per phase, *after* actual solar production. Never subtract
+    tomorrow's global PV forecast again, or credit another phase's battery.
+    Require a complete, mature three-phase history: unknown is not zero.
+    This is a planning request, never an authorization to command hardware.
+    """
+    runtime = getattr(controller, "_phase_runtime", None)
+    profile = getattr(controller, "_phase_demand_profile", None)
+    forecast_fn = getattr(profile, "forecast_daytime", None)
+    channels = getattr(runtime, "channels", ()) or ()
+    phase_by_name = {
+        channel.battery_key: channel.phase
+        for channel in channels if getattr(channel, "enabled", False)
+    }
+    if (
+        len(coordinators) != 3
+        or len(room_kwh) != 3
+        or set(phase_by_name.values()) != {"L1", "L2", "L3"}
+        or {getattr(c, "name", None) for c in coordinators} != set(phase_by_name)
+        or not callable(forecast_fn)
+    ):
+        return None
+    try:
+        forecast = forecast_fn()
+        if not isinstance(forecast, dict) or set(forecast) != {"L1", "L2", "L3"}:
+            return None
+        if any(_finite(forecast[p]) is None or float(forecast[p]) < 0 for p in forecast):
+            return None
+        needs = {}
+        for c, room in zip(coordinators, room_kwh):
+            capacity = float(c.data["battery_total_energy"])
+            soc = float(c.data["battery_soc"])
+            floor = float(floor_of(c))
+            room = float(room)
+            if (
+                not all(math.isfinite(v) for v in (capacity, soc, floor, room))
+                or capacity <= 0 or not 0 <= soc <= 100
+                or not 0 <= floor <= 100 or room < 0
+            ):
+                return None
+            phase = phase_by_name[c.name]
+            usable = max(0.0, (soc - floor) / 100.0 * capacity)
+            needs[c] = min(room, max(0.0, float(forecast[phase]) - usable))
+        return needs
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def reserve_phase_daytime_needs(controller, coordinators, room_kwh, energy_kwh, minimums):
+    """Preserve individual minimums while assigning the *remaining* fleet kWh.
+
+    The usual phase-demand weighting is only applied to the excess. In
+    particular an L3 minimum may never be transferred to an L1/L2 battery.
+    """
+    if minimums is None or set(minimums) != set(coordinators):
+        return None
+    reserved = {
+        c: min(max(0.0, float(room)), max(0.0, float(minimums[c])))
+        for c, room in zip(coordinators, room_kwh)
+    }
+    # A helper must not allocate more than the caller's total kWh, even if a
+    # future caller passes fewer kWh than the local requirements request.
+    budget = min(max(0.0, float(energy_kwh)), sum(max(0.0, float(v)) for v in room_kwh))
+    minimum_total = sum(reserved.values())
+    if minimum_total > budget and minimum_total > 0:
+        reserved = {c: value * budget / minimum_total for c, value in reserved.items()}
+    room_left = [max(0.0, float(room) - reserved[c]) for c, room in zip(coordinators, room_kwh)]
+    available = max(0.0, min(sum(room_left), budget - sum(reserved.values())))
+    extra = phase_charge_shares(controller, coordinators, room_left, available)
+    if extra is None:
+        total = sum(room_left)
+        extra = {
+            c: available * room / total if total > 0 else 0.0
+            for c, room in zip(coordinators, room_left)
+        }
+    return {c: reserved[c] + extra[c] for c in coordinators}
+
+
 def phase_charge_shares(controller, coordinators, room_kwh, energy_kwh):
     """The same phase-demand shares as runtime, or None for a non-phase fleet."""
     runtime = getattr(controller, "_phase_runtime", None)

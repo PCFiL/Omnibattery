@@ -116,6 +116,7 @@ jobs:
                 tests/test_pricing_notifications.py \
                 tests/test_phase_recovery_config_api.py \
                 tests/test_time_slot_overnight_regressions.py \
+                tests/test_time_slot_phase_deficit_guard.py \
                 tests/test_manual_slot_schedule.py \
                 tests/test_time_slot_power_limits.py \
                 tests/test_charge_sequence_runtime.py \

@@ -83,8 +83,10 @@ de Pause VE, de mode manuel ou de blocage, elle ne forcera pas une recharge.
 ## Données et limites de la prévision
 
 Le prévisionnel reste en lecture seule : il ne change ni les consignes actives
-ni les demandes de récupération. Il partage un budget global puis le répartit
-par phase ; un objectif de récupération est un minimum local, pas un deuxième
+ni les demandes de récupération. Le budget du planificateur global reste unique, mais doit aussi couvrir
+les exigences minimales individuelles de chaque phase avant de répartir
+l'éventuel surplus. Une réserve en L2 ne peut pas effacer un déficit en L3.
+Un objectif de récupération est un minimum local, pas un deuxième
 volume ajouté à une recharge déjà suffisante.
 
 Le profil de parts de consommation conserve 14 jours d'observations ; les replis

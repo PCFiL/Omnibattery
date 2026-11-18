@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.6.7] - 2026-11-18
+
+### HC predictive charging: sunset forecast and phase-local reserve
+
+- Treat a readable 0 kWh remaining-today forecast at 22:00 as valid.
+  Keep the bounded five-minute grace for genuinely missing forecasts and
+  potentially unpublished values at midnight; accept already dated positive
+  midnight curves. Recheck the provider after evaluation rather than testing
+  the scalar, which may legitimately be zero after the safety margin.
+- Prevent a high-SOC L2 from masking a real L3 deficit in the Tempo HC
+  preview. Reserve physically bounded individual phase requirements before
+  distributing the remaining global budget; preview remains read-only.
+- On the real Time Slot planner, when a mature three-phase net-demand model
+  is available, reserve each phase's predicted daytime need before the
+  configured HC window ends. Preserve the global cumulative deadline
+  (requirements overlap, not added twice), cap at each battery's SOC room and
+  physical charging capability, and never transfer L3's minimum to L1/L2.
+  Missing or incomplete phase history retains the original global fallback.
+- Expose phase-daytime requirements, their source/deadline, actual active
+  quota and evaluation timestamp on the predictive diagnostic entity.
+- Preserve Tempo red 100%, weekly full-charge, minimum-SOC recovery, AROME,
+  manual/EV pause and physical phase import protections. Add regression tests
+  for after-sunset zero, midnight retry, L3 deficit masked by L2 and fallback.
+
 ## [1.6.6] - 2026-11-18
 
 ### Upstream 1.6.1 backports for the PCFiL fork

@@ -265,13 +265,20 @@ def preview_window(
             raise ValueError("Invalid global planner result")
         floors = [max(0.0, min(cap, b.capacity * max(b.minimum, floor_pct) / 100 - e))
                   for b, e, cap in zip(batteries, start_energy, caps)]
-        budget = max(budget, sum(floors))
-        # Reserve each individual guaranteed floor before weighting the rest.
+        # A fleet-wide energy surplus cannot be moved between physical phases.
+        # In particular, a full L2 must not erase the deficit projected on L3.
+        # These per-phase requirements are bounded by the battery's own room,
+        # so reserving them once does not duplicate the shared global budget.
+        budget = max(budget, sum(floors), sum(needs))
+        # Reserve each individual phase need, as well as guaranteed SOC floors,
+        # before distributing any remaining global energy budget. A zero
+        # global budget must not silently turn a real P3 need into 0 kWh.
         # Merely raising the fleet budget could otherwise starve a low-load phase.
-        extra = distribute(max(0.0, budget - sum(floors)),
-                           [max(0.0, n - f) for n, f in zip(needs, floors)],
-                           [c - f for c, f in zip(caps, floors)])
-        requested = [f + x for f, x in zip(floors, extra)]
+        reserved = [min(c, max(f, n)) for c, f, n in zip(caps, floors, needs)]
+        extra = distribute(max(0.0, budget - sum(reserved)),
+                           [max(0.0, n) for n in needs],
+                           [c - r for c, r in zip(caps, reserved)])
+        requested = [r + x for r, x in zip(reserved, extra)]
     # During HC show the frozen executable targets separately and use them
     # when present instead of inventing a moving target from the latest SOC.
     if current and not forced:

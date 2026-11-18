@@ -85,12 +85,53 @@ def test_soc_above_configured_ceiling_is_not_destroyed():
     assert result == pytest.approx([7.6]*3)
 
 
-def test_l3_demand_gets_more_of_single_global_budget():
+def test_l3_demand_cannot_be_erased_by_a_smaller_global_budget():
     result=preview(global_budget=lambda *args: 4)
     rows=result["rows"]
     assert rows[2]["needed_battery_kwh"] > rows[0]["needed_battery_kwh"]
-    assert sum(r["needed_battery_kwh"] for r in rows) == pytest.approx(4,abs=.002)
-    assert result["needed_battery_kwh"] == pytest.approx(4)
+    # One shared budget, raised only to meet actual per-phase minima; no
+    # battery's demand can be assigned to a different physical phase.
+    assert result["needed_battery_kwh"] == pytest.approx(
+        result["global_required_kwh"]
+    )
+    assert result["global_required_kwh"] >= 4
+
+
+def test_surplus_on_l2_does_not_mask_l3_daytime_need():
+    now = at(hour=21)
+    window = tempo_windows(now)[1]
+    b = list(batteries())
+    b[0] = replace(b[0], soc=34.4)
+    b[1] = replace(b[1], soc=87.1)
+    b[2] = replace(b[2], soc=13.9)
+    # L1/L2 have no residual daytime demand, whereas L3 has ~5.76 kWh
+    # after sunrise. The aggregate callback reports zero (surplus L2).
+    items = data(now, window.end.replace(hour=22), load=(0, 0, .36))
+    out = preview(now=now, window=window, batteries=b, items=items,
+                  global_budget=lambda *args: 0)
+    rows = out["rows"]
+    assert out["global_required_kwh"] > 5.0
+    assert rows[0]["needed_battery_kwh"] == 0
+    assert rows[1]["needed_battery_kwh"] == 0
+    assert rows[2]["needed_battery_kwh"] > 5.0
+    assert rows[2]["planned_battery_kwh"] > 0
+    assert rows[2]["soc_target"] > rows[2]["soc_start"]
+    assert out["needed_battery_kwh"] == pytest.approx(
+        sum(row["needed_battery_kwh"] for row in rows), abs=.002
+    )
+
+
+def test_global_need_only_assigns_the_excess_after_phase_reservations():
+    now = at(hour=21)
+    window = tempo_windows(now)[1]
+    b = tuple(replace(x, soc=80) for x in batteries())
+    # Every phase has ample usable energy; global demand is solely for an
+    # independent forecast margin, and must be allocated *once*.
+    items = data(now, window.end.replace(hour=22), load=(0, 0, 0))
+    out = preview(now=now, window=window, batteries=b, items=items,
+                  global_budget=lambda *args: 2)
+    assert out["needed_battery_kwh"] == pytest.approx(2)
+    assert sum(x["needed_battery_kwh"] for x in out["rows"]) == pytest.approx(2, abs=.002)
 
 
 def test_one_global_budget_callback_call():
