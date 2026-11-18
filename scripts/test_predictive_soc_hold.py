@@ -167,11 +167,14 @@ class HoldTests(unittest.TestCase):
         self.refresh()
         self.assertEqual(self.hold.records, {})
 
-    def test_updated_approved_target_can_decrease(self):
+    def test_reduced_recheck_target_cannot_release_prior_reserved_soc(self):
         self.refresh()
         self.ctl._phase_predictive_targets['battery_3'] = 30
         self.refresh(at(2))
-        self.assertEqual(self.hold.records['L3']['target_soc'], 30)
+        # Charging may stop at the reduced live target, while the previous
+        # 44% approved reserve stays protected against normal PD until 06:00.
+        self.assertEqual(self.hold.records['L3']['target_soc'], 44)
+        self.assertEqual(self.limit(), 0)
 
     def test_updated_approved_target_can_increase(self):
         self.refresh()
@@ -184,7 +187,7 @@ class HoldTests(unittest.TestCase):
         self.ctl._phase_predictive_targets = {}
         self.ctl._predictive_charge_target_soc = {self.batteries[2]: 30}
         self.refresh(at(2))
-        self.assertEqual(self.hold.records['L3']['target_soc'], 30)
+        self.assertEqual(self.hold.records['L3']['target_soc'], 44)
 
     def test_power_limit_zero_is_not_increased(self):
         self.refresh()

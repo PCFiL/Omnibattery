@@ -151,8 +151,14 @@ class PredictiveSocHold:
             if (active and target is not None and current is not None
                     and getattr(battery, "is_available", False)):
                 if target > current + 0.2 or phase in kept:
+                    # A shorter/lower revised grid-charge target may STOP
+                    # charging, but it must not release energy already
+                    # reserved under an accepted phase target before 06:00.
+                    # Manual/disable still clear the record above, and a
+                    # higher accepted target legitimately raises this floor.
+                    held_target = max(target, stored_soc) if phase in kept else target
                     kept[phase] = {"identity": identity, "until": until,
-                                   "target_soc": target}
+                                   "target_soc": held_target}
             if phase in kept:
                 self.status[phase] = {
                     "target_soc": kept[phase]["target_soc"], "until": until,

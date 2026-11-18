@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'custom_components/omnibattery/forecast/**'
+      - 'custom_components/omnibattery/pricing/time_slot_recheck.py'
+      - 'tests/test_time_slot_recheck_pure.py'
       - 'custom_components/omnibattery/sensors/tempo_preview.py'
       - 'custom_components/omnibattery/frontend/tempo-preview.js'
       - 'custom_components/omnibattery/phase_diagnostics.py'
@@ -32,6 +34,7 @@ jobs:
           node-version: '22'
       - run: python -m pip install pytest
       - run: python scripts/test_tempo_preview_isolated.py
+      - run: python scripts/test_time_slot_recheck_isolated.py
       - run: node --check custom_components/omnibattery/frontend/tempo-preview.js
   ha-contracts:
     runs-on: ubuntu-latest

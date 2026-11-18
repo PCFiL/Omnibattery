@@ -525,6 +525,9 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
         "energy_horizon_end", "overnight_consumption_kwh",
         "phase_daytime_minimum_kwh", "phase_daytime_deadline",
         "active_slot_energy_target_kwh",
+        "time_slot_reevaluation_reason",
+        "time_slot_next_periodic_recheck_at", "time_slot_phase_soc_snapshot",
+        "time_slot_daytime_phase_forecast_kwh", "time_slot_next_day_solar_kwh",
     })
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, controller) -> None:
@@ -716,6 +719,11 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
                 "phase_daytime_deadline": decision.get("phase_daytime_deadline"),
                 "active_slot_energy_target_kwh": decision.get("active_slot_energy_target_kwh"),
                 "time_slot_evaluation_context": decision.get("time_slot_evaluation_context"),
+                "time_slot_reevaluation_reason": decision.get("time_slot_reevaluation_reason"),
+                "time_slot_next_periodic_recheck_at": decision.get("time_slot_next_periodic_recheck_at"),
+                "time_slot_phase_soc_snapshot": decision.get("time_slot_phase_soc_snapshot"),
+                "time_slot_daytime_phase_forecast_kwh": decision.get("time_slot_daytime_phase_forecast_kwh"),
+                "time_slot_next_day_solar_kwh": decision.get("time_slot_next_day_solar_kwh"),
                 "time_slot_evaluated_at": (
                     decision["time_slot_evaluated_at"].isoformat()
                     if isinstance(decision.get("time_slot_evaluated_at"), datetime)

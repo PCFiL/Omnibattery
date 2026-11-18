@@ -76,6 +76,8 @@ from ..solar_forecast import (
     get_configured_solar_forecast_sensor,
     read_remaining_solar_kwh,
     read_solar_forecast_kwh,
+    _arome_companion_entity,
+    _arome_power_periods,
     solar_forecast_local_timezone,
     solar_forecast_period_energy_between,
 )
@@ -112,6 +114,11 @@ from .chronological import (
     normalize_energy_shape,
 )
 from .solar_timeline import build_boundaries, build_solar_timeline, provider_weights
+from .time_slot_recheck import (
+    ACTIVE_PLAN_RECHECK_SECONDS, INPUT_POLL_SECONDS,
+    EARLY_RECHECK_COOLDOWN_SECONDS,
+    capture_time_slot_inputs, recheck_reasons, due_after,
+)
 from .curtailment import (
     BatterySnapshot,
     CurtailmentPlan,
@@ -7412,6 +7419,56 @@ class PricingManager:
             and monotonic() - changed_at < CONFIG_REPLAN_SETTLE_S
         )
 
+    def _time_slot_capture_inputs(self, now: datetime, active_window):
+        """Read independent phase SOC/demand and tomorrow's dated AROME curve.
+
+        A shadow sample is never a command or a plan. Preserve incomplete
+        forecast data as unavailable rather than a fictitious 0 kWh. Read only
+        once a minute during HC; the 2-second safety controller is untouched.
+        """
+        controller = self._controller
+        owned = getattr(controller, "_is_battery_manual_owned", None)
+        automatic = [
+            battery for battery in getattr(controller, "coordinators", ()) or ()
+            if getattr(battery, "data", None)
+            and not getattr(battery, "battery_manual_mode_enabled", False)
+            and not (callable(owned) and owned(battery))
+        ]
+        phase_model = getattr(controller, "_phase_demand_profile", None)
+        forecast_daytime = getattr(phase_model, "forecast_daytime", None)
+        try:
+            phase_daytime = forecast_daytime() if callable(forecast_daytime) else None
+        except Exception:  # Diagnostic evidence cannot disable regulation.
+            _LOGGER.debug("Time Slot: phase-daytime forecast read failed", exc_info=True)
+            phase_daytime = None
+        target_date = active_window.end.date()
+        forecast = read_solar_forecast_kwh(
+            self._hass, controller, update_controller=False
+        )
+        periods = getattr(forecast, "periods", ()) or ()
+        snapshot = capture_time_slot_inputs(
+            automatic, phase_daytime, periods, solar_date=target_date,
+        )
+        if snapshot.solar_daylight_hourly_kwh is not None:
+            return snapshot
+        # AROME today/tomorrow curves sometimes publish independently.
+        # The remaining-today sensor can still read zero after sunset even
+        # when its tomorrow companion has a complete, dated forecast.
+        sensor = (
+            get_configured_solar_forecast_sensor(controller, "remaining")
+            or get_configured_solar_forecast_sensor(controller, "today")
+        )
+        if sensor and "arome_solar_forecast" in sensor:
+            label = "today" if target_date == now.date() else "tomorrow"
+            companion_id = _arome_companion_entity(sensor, label)
+            state = self._hass.states.get(companion_id) if companion_id else None
+            specific = _arome_power_periods(state, day=target_date)
+            if specific:
+                return capture_time_slot_inputs(
+                    automatic, phase_daytime, specific, solar_date=target_date,
+                )
+        return snapshot
+
     async def handle_time_slot_predictive_charging(self) -> None:
         """Handle predictive charging in time slot mode (extracted from main loop)."""
         from ..control.predictive_schedule import describe_predictive_schedule
@@ -7476,6 +7533,12 @@ class PricingManager:
             entering_window = window_key is not None and previous_window is None
             if window_key is not None:
                 self._controller._time_slot_active_window = window_key
+            if window_changed:
+                # A fresh night must never inherit yesterday's phase/PV
+                # baseline. A same-night reload already has initial_eval.
+                self._controller._time_slot_last_inputs = None
+                self._controller._time_slot_current_inputs = None
+                self._controller._time_slot_inputs_checked_at = None
             is_initial_eval = (
                 self._controller.last_evaluation_soc is None or window_changed
             )
@@ -7559,6 +7622,48 @@ class PricingManager:
                 except (TypeError, ValueError):
                     inactive_refresh = True
 
+            # While a grid charge is already active, do not leave its energy
+            # and phase quotas frozen until a 30-point *average* SOC change.
+            # Every 30 minutes reassess the individual phases and fresh PV.
+            # An inactive slot retains its shorter 15-minute retry.
+            active_refresh = (
+                not is_initial_eval
+                and self._controller.grid_charging_active
+                and due_after(now, last_evaluation_at, ACTIVE_PLAN_RECHECK_SECONDS)
+            )
+            individual_changes = ()
+            current_inputs = getattr(self._controller, "_time_slot_current_inputs", None)
+            last_probe = getattr(self._controller, "_time_slot_inputs_checked_at", None)
+            if (
+                active_window is not None
+                and (is_initial_eval or due_after(now, last_probe, INPUT_POLL_SECONDS))
+            ):
+                try:
+                    current_inputs = self._time_slot_capture_inputs(now, active_window)
+                except Exception:
+                    _LOGGER.warning(
+                        "Time Slot: input monitoring failed; regular reevaluation remains available",
+                        exc_info=True,
+                    )
+                    current_inputs = None
+                self._controller._time_slot_inputs_checked_at = now
+                self._controller._time_slot_current_inputs = current_inputs
+            if not is_initial_eval and current_inputs is not None:
+                individual_changes = recheck_reasons(
+                    getattr(self._controller, "_time_slot_last_inputs", None),
+                    current_inputs,
+                )
+                # Coalesce rapid provider updates and natural telemetry noise.
+                # An ownership change is always urgent; the phase writer has
+                # independently gated the affected battery already.
+                if (
+                    "phase_ownership_or_availability_changed" not in individual_changes
+                    and not due_after(
+                        now, last_evaluation_at, EARLY_RECHECK_COOLDOWN_SECONDS,
+                    )
+                ):
+                    individual_changes = ()
+
             should_reevaluate = (
                 is_initial_eval or
                 floor_crossed or
@@ -7566,6 +7671,8 @@ class PricingManager:
                 forecast_moved or
                 peak_shaving_moved or
                 inactive_refresh or
+                active_refresh or
+                bool(individual_changes) or
                 abs(current_avg_soc - self._controller.last_evaluation_soc) >= SOC_REEVALUATION_THRESHOLD
             )
 
@@ -7576,6 +7683,38 @@ class PricingManager:
                 should_reevaluate = False
 
             if should_reevaluate:
+                reevaluation_reason = (
+                    "initial_window" if is_initial_eval
+                    else "phase_input:" + ",".join(individual_changes)
+                    if individual_changes else "active_periodic_30m"
+                    if active_refresh else "inactive_retry_15m"
+                    if inactive_refresh else "arome_remaining_revised"
+                    if forecast_moved else "peak_shaving_changed"
+                    if peak_shaving_moved else "soc_floor_changed"
+                    if floor_crossed or floor_recovered else "fleet_soc_changed"
+                )
+                # A transient AROME reset at 00:00 is not a zero-solar day.
+                # Preserve an active charge/target while waiting for new
+                # dated data; after five minutes fall back conservatively.
+                if (
+                    not is_initial_eval and now.hour == 0 and now.minute < 5
+                    and (
+                        get_configured_solar_forecast_sensor(self._controller, "remaining")
+                        or get_configured_solar_forecast_sensor(self._controller, "today")
+                    )
+                    and not (individual_changes and any(
+                        reason.startswith("phase_soc_drop:")
+                        for reason in individual_changes
+                    ))
+                    and self._time_slot_forecast_pending(
+                        read_solar_forecast_kwh(
+                            self._hass, self._controller, update_controller=False
+                        ), now,
+                    )
+                ):
+                    if self._controller.grid_charging_active:
+                        await self._controller._handle_predictive_grid_charging()
+                    return
                 if forecast_moved:
                     self._controller._dp_solar_forecast_reeval_at = now
                     self._controller._dp_solar_forecast_reeval_count = (
@@ -7592,6 +7731,16 @@ class PricingManager:
                     _LOGGER.info(
                         "RE-EVALUATING predictive grid charging: peak shaving %s (SOC: %.1f%%)",
                         "engaged" if peak_shaving_held else "released",
+                        current_avg_soc,
+                    )
+                elif individual_changes:
+                    _LOGGER.info(
+                        "RE-EVALUATING Time Slot by phase/provider: %s (SOC: %.1f%%)",
+                        ", ".join(individual_changes), current_avg_soc,
+                    )
+                elif active_refresh:
+                    _LOGGER.info(
+                        "RE-EVALUATING active Time Slot after 30 minutes (SOC: %.1f%%)",
                         current_avg_soc,
                     )
                 elif inactive_refresh:
@@ -7704,6 +7853,32 @@ class PricingManager:
                 )
                 decision_data["time_slot_evaluation_context"] = "active_window"
                 decision_data["time_slot_evaluated_at"] = now
+                decision_data["time_slot_reevaluation_reason"] = reevaluation_reason
+                decision_data["time_slot_next_periodic_recheck_at"] = (
+                    now + timedelta(
+                        seconds=(
+                            ACTIVE_PLAN_RECHECK_SECONDS
+                            if decision_data.get("should_charge")
+                            else TIME_SLOT_INACTIVE_REEVALUATION_S
+                        )
+                    )
+                ).isoformat()
+                if current_inputs is not None:
+                    decision_data["time_slot_phase_soc_snapshot"] = dict(
+                        current_inputs.phase_socs
+                    )
+                    decision_data["time_slot_daytime_phase_forecast_kwh"] = (
+                        dict(current_inputs.daytime_phase_kwh)
+                        if current_inputs.daytime_phase_kwh else None
+                    )
+                    decision_data["time_slot_next_day_solar_kwh"] = (
+                        round(current_inputs.solar_daylight_kwh, 3)
+                        if current_inputs.solar_daylight_kwh is not None else None
+                    )
+                # Advance the reference only for an accepted reevaluation;
+                # provider changes during an awaited calculation stay pending.
+                if current_inputs is not None:
+                    self._controller._time_slot_last_inputs = current_inputs
                 # The per-battery target is only recomputed while it is None;
                 # a re-evaluation's new quota otherwise never reached it and
                 # the window kept charging to the slot-entry target.
@@ -7711,6 +7886,12 @@ class PricingManager:
 
                 was_active = self._controller.grid_charging_active
                 self._controller.grid_charging_active = decision_data["should_charge"]
+                if was_active and not self._controller.grid_charging_active:
+                    # The phase writer requires an explicit owner release even
+                    # if the old target remains above its new prediction.
+                    self._controller._phase_predictive_targets = {}
+                    self._controller._grid_charging_initialized = False
+                    self._reset_predictive_demand_runtime()
                 self._controller.last_evaluation_soc = current_avg_soc
                 self._controller._time_slot_last_evaluation_at = now
                 self._controller._dp_config_dirty = False
@@ -7780,6 +7961,9 @@ class PricingManager:
             self._controller._active_time_slot_quota_kwh = None
             self._controller._time_slot_active_window = None
             self._controller._time_slot_last_evaluation_at = None
+            self._controller._time_slot_last_inputs = None
+            self._controller._time_slot_current_inputs = None
+            self._controller._time_slot_inputs_checked_at = None
 
     async def _send_predictive_charging_notification(
         self,

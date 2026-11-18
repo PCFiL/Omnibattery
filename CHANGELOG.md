@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.6.8] - 2026-11-18
+
+### Phase-aware Time Slot recalculation during HC
+
+- Re-evaluate an already active Time Slot charge every **30 minutes**;
+  retain the pre-existing 15-minute inactive retry and the immediate
+  22:00 window-entry / 06:00 cutoff gates.
+- Read the SOC of L1, L2 and L3 independently once per minute. A drop
+  of **5 percentage points on any eligible battery** triggers an earlier
+  reevaluation (with a 5-minute early-trigger cooldown), even when the
+  three-battery average barely moves. Ordinary rising SOC during charging
+  does not cause unnecessary evaluation chatter.
+- Compare mature learned daytime net-load estimates **per phase**. A
+  change of at least **1.0 kWh on one phase** reopens its energy plan;
+  the control planner then rebuilds all three local physical quotas.
+- Monitor **dated AROME production for the day after HC begins**, with the
+  same target civil day before and after midnight. A **1.5 kWh difference
+  in the 06:00–22:00 hourly production curve** triggers a new full plan,
+  including shifts from morning to afternoon even when the total stays
+  constant. A missing/incomplete provider curve is *unknown*, never
+  treated as 0 kWh. Do not trigger on the ordinary reduction of today's
+  remaining forecast after sunset.
+- During the first five minutes after midnight, avoid replacing a live
+  approved plan with a forecast that has not been republished; keep the
+  existing guarded charge until the forecast arrives or a conservative
+  follow-up is possible.
+- Preserve previously accepted SOC reservations until 06:00 even when a
+  new forecast permits a lower **charging** target; manual/disable clears
+  reservations and EV pause suspends them as before. Infeasible demands
+  remain visible; battery and per-phase limits always win.
+- Expose the live Time Slot reevaluation reason, next periodic deadline,
+  measured phase SOCs, per-phase learned demand and next-day dated solar
+  on the predictive diagnostic entity. Add isolated and HA-level
+  regression tests for independent phase changes, active deadlines,
+  provider revisions, manual ownership and exact 06:00 release.
+
+The daytime phase-demand model is based on mature **historical net-of-PV**
+load. AROME is used for the dated global forecast and its revisions;
+Omnibattery does not invent separate future PV curves for L1/L2/L3
+without measured phase-specific solar forecasts.
+
 ## [1.6.7] - 2026-11-18
 
 ### HC predictive charging: sunset forecast and phase-local reserve
