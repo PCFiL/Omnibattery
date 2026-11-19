@@ -10,6 +10,14 @@
 - Sessy Home Battery (Looking for testers!!!)
 - Hoymiles MS-A2 and HiBattery MQTT models
 
+> [!NOTE]
+> **PCFiL fork (v1.6.8):** This repository includes additional three-phase
+> predictive charging, EDF Tempo, AROME forecasting and safety improvements
+> beyond the [original ffunes/Omnibattery project](https://github.com/ffunes/Omnibattery).
+> See [fork-specific behaviour](#pcfil-fork-three-phase-predictive-charging-v168)
+> and the [changelog](CHANGELOG.md). Features documented on the original
+> project's website may differ from this fork.
+
 ## Key Features
 
 - **Mix and match different battery brands**: Marstek, Zendure, Anker Solix, Sessy, Hoymiles MQTT and more to come!
@@ -18,6 +26,9 @@
 - **One-Click PD Profiles + Quality Sensor**: Pick a tuning profile (Very smooth → Very aggressive) instead of tuning gains by hand; a control-quality sensor reports whether the result is stable, oscillating or sluggish.
 - **Multi-Battery Support**: Manage up to 10 batteries with intelligent load sharing and SOC-based priority.
 - **Predictive Grid Charging**: Automatically charges from the grid when solar forecast + battery won't cover tomorrow's consumption. Supports fixed time slots, dynamic pricing, and real-time pricing modes. An optional grid-charge margin (%) tops up the grid amount to hedge optimistic solar forecasts.
+- **PCFiL three-phase predictive charging**: In Time Slot mode, each eligible L1/L2/L3 battery can retain its own learned net-demand energy requirement; a full battery on another phase cannot hide that deficit. Physical charge and import limits still apply.
+- **PCFiL off-peak re-planning**: The active Time Slot forecast is re-evaluated every 30 minutes (15 minutes when inactive), and may be recalculated sooner after meaningful phase SOC, learned load or dated AROME forecast changes.
+- **EDF Tempo and SOC protections (PCFiL)**: Confirmed red-day preparation, configurable weekly full charge, phase-local low-SOC recovery, manual ownership and EV charging pause retain their own priority and safety checks.
 - **Negative-price opportunistic charging**: Optional Dynamic Pricing-only charging fills each battery to its configured maximum SOC during negative import-price slots, even without solar panels or a forecast energy deficit.
 - **Smart Pre-discharge / Anti-curtailment**: Optional Dynamic Pricing-only planning creates battery headroom before forecast PV surplus at negative-injection prices, then blocks discharge during the protected window while preserving SOC floors and safety ownership.
 - **Time Slots**: Per-battery windows with independent charge/discharge ticks, optional SOC and power overrides, and a manual mode that forces a fixed charge or discharge power. Up to 8 slots per integration.
@@ -48,7 +59,9 @@ If you find this integration useful, you can support my work:
 
 Full documentation (configuration, features, entities, troubleshooting) is available at:
 
-**[https://ffunes.github.io/Omnibattery/](https://ffunes.github.io/Omnibattery/)**
+**[Upstream Omnibattery documentation](https://ffunes.github.io/Omnibattery/)** (general features).
+
+For this fork's additional features, see the [three-phase charging guide below](#pcfil-fork-three-phase-predictive-charging-v168), [Tempo preview and phase recovery](docs/tempo-preview.md), [EDF Tempo](site-docs/features/edf-tempo.md), [AROME solar forecasts](site-docs/features/arome-solar-forecast.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Requirements
 
@@ -66,9 +79,15 @@ Full documentation (configuration, features, entities, troubleshooting) is avail
 
 **HACS (Recommended)**
 
-[![Open your Home Assistant instance and add a custom repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ffunes&repository=Omnibattery&category=integration)
+[![Open your Home Assistant instance and add this fork as a custom repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=PCFiL&repository=Omnibattery&category=integration)
 
-Search for "Omnibattery", install, and restart Home Assistant.
+In HACS, add `https://github.com/PCFiL/Omnibattery` as a **custom Integration repository**, select the **PCFiL fork** and install/update it. Restart Home Assistant after updating. Searching for "Omnibattery" without adding the fork may install the **upstream** repository instead.
+
+> [!TIP]
+> Before upgrading a working battery-control installation, make a Home Assistant
+> backup and check `custom_components/omnibattery/manifest.json` for the
+> installed version. If you use a customized browser panel, hard-refresh
+> the page after the upgrade (`Ctrl+F5`).
 
 **Manual**
 
@@ -119,6 +138,141 @@ If the old config entries were deleted from *Settings → Devices & Services* be
 
 After migration, system entities keep their old `marstek_venus_system_*` IDs. If you want to rename them, go to **Settings → Devices & Services → Omnibattery → ⋯ → Recreate entity IDs**. This renames them in-place with history preserved, but any automations, templates, or Energy dashboard entries that reference the old IDs must be updated manually.
 
+## PCFiL fork: three-phase predictive charging (v1.6.8)
+
+The PCFiL fork keeps the original battery integrations and PD regulation while
+adding EDF Tempo-aware, per-phase **Time Slot** charging. The scenario is three
+independently measured phases with batteries explicitly mapped to **L1, L2,
+and L3**. The ordinary global energy balance remains in use, but no longer
+limits the plan to a single fleet-wide deficit: a genuine shortfall on L3
+can create a phase-local charge reservation even when L2 is already full.
+
+### How phase energy requirements are calculated
+
+1. The consumption tracker provides a learned profile, and the predictive
+   planner evaluates the current SOC, remaining battery headroom, household
+   consumption, solar forecast and safety margin.
+2. For a complete, mature three-phase PD configuration, a **separate daytime
+   net-demand forecast** is computed for L1, L2 and L3. The model uses
+   residual demand *after measured PV*, not gross house consumption.
+3. A per-phase minimum is reserved **before** the remaining global energy
+   budget is distributed. The same energy is not added twice; an L3 requirement
+   cannot be funded by energy stored on L1/L2.
+4. The final allocation is bounded by each battery's SOC ceiling, expected
+   charging power, permitted window, phase import limit and global import
+   headroom. An infeasible target is reported as a shortfall; it is **not**
+   silently moved to another phase.
+
+Phase history is stored for up to 28 days. At least **three completed days**
+with at least **10 hours of valid 06:00–22:00 measurements on all three
+phases** are required for mature daytime predictions. Up to seven eligible
+recent days contribute to the average. EV charging identified by Omnibattery
+and **EV charging pause** are excluded from that learning. If complete
+phase history is not available, the original global, SOC-headroom-based
+allocation remains the fallback.
+
+**Solar accuracy:** Dated AROME periods are used to estimate solar energy and
+its timing on the target day. Omnibattery does **not** invent independent
+L1/L2/L3 future PV forecasts; its phase-demand history is net of historically
+measured solar production.
+
+### Time Slot / off-peak re-evaluation
+
+For the EDF Tempo setup, authorized grid-charging hours are **22:00–06:00
+Europe/Paris**, including the period across midnight. Charging is evaluated
+at the beginning of the permitted slot and blocked outside that window.
+
+| Situation | Behaviour in v1.6.8 |
+| --- | --- |
+| Entering a configured HC window | Immediate evaluation with current SOC and forecasts |
+| Predictive grid charging **active** | Full re-evaluation after **30 minutes** |
+| Predictive grid charging **inactive** inside HC | Re-evaluation after **15 minutes** |
+| Monitoring inputs | Check every **60 seconds**, without an automatic power write |
+| A single battery loses at least **5 SOC points** | Early re-evaluation, independent of fleet-average SOC |
+| Learned daytime demand changes by at least **1.0 kWh** on one phase | Early re-evaluation with updated per-phase allocation |
+| Dated AROME 06:00–22:00 curve for the HC-following day changes by **1.5 kWh** or more (sum of hourly differences) | Early re-evaluation, including shifts in production timing |
+| Several input changes close together | **5-minute cooldown** between ordinary early recalculations |
+| Planning settings change | Re-plan after a **3-second debounce**; safety cutoffs remain immediate |
+| Forecast unavailable near midnight | Brief bounded grace for provider publication, without treating a missing value as zero |
+| End of HC, at **06:00** | Stop HC grid-charging permission; normal safe control resumes |
+
+The live PD/phase safety controller continues running independently on its
+normal, faster control cadence. Re-evaluation does **not** bypass hardware
+interlocks, the Shelly/phase meters, import limits or command ownership.
+Previously approved per-phase SOC reservations are kept until **06:00**
+even if a revised prediction lowers the required *charging target*.
+A manual takeover or predictive disable cancels the reservation, while
+EV pause suspends charging.
+
+### Tempo, weekly full charge and SOC recovery
+
+- **Confirmed Tempo red day:** The configured preparation can request
+  **100% SOC** during permitted off-peak hours. Red-day peak hours do not
+  authorize tariff-driven grid charging.
+- **Weekly full charge:** Uses the configured day/start/end times and existing
+  hysteresis instead of hard-coded schedules. It retains priority over an
+  ordinary predictive target while active.
+- **Per-phase low-SOC recovery:** Independently configurable on L1/L2/L3;
+  for example, a trigger at **9%** and target of **15%**. This is not
+  equivalent to a continuously maintained 15% reserve.
+- **Manual and EV charging pause:** Preserve user control; EV pause prevents
+  Omnibattery from sending nonzero battery commands. Neither a forecast
+  nor a preview grants an exception to the protection/ownership rules.
+
+### Dashboard and diagnostics
+
+The `sensor.tempo_charge_preview` snapshot is **read-only** and shows
+the estimated per-phase SOC, energy required, energy feasible and constraints.
+Its large headline is currently tied to **`next_window`** (the *following*
+HC period), even while the current night is running. The active night is in
+`current_window` / **Forecast details**. A missing dated forecast for a
+future day is shown as **unavailable / — kWh**, *not* as 0 kWh; this does
+**not** mean the current night's charge is blocked.
+
+Inspect the control-owned
+`binary_sensor.omnibattery_predictive_charging_active` for the **actual**
+Time Slot decision. Useful attributes include:
+
+| Attribute | Meaning |
+| --- | --- |
+| `time_slot_evaluated_at` | Timestamp of the last accepted active-window evaluation |
+| `time_slot_reevaluation_reason` | Window entry, periodic timer, SOC/phase or forecast trigger |
+| `time_slot_next_periodic_recheck_at` | Next expected periodic evaluation (early triggers may run sooner) |
+| `time_slot_phase_soc_snapshot` | Battery SOCs at that evaluation, by battery name |
+| `time_slot_daytime_phase_forecast_kwh` | Learned net daytime demand by phase |
+| `time_slot_next_day_solar_kwh` | Available dated solar estimate for the target day, or unavailable |
+| `phase_daytime_minimum_kwh` | Minimum storage requirement per battery where phase learning is available |
+| `phase_charge_energy_requested_kwh` | Requested charging energy per battery |
+| `phase_charge_energy_targets_kwh` | Physically bounded charging energy per battery |
+| `active_slot_energy_target_kwh` | Current executable Time Slot quota |
+| `phase_charge_shortfall_kwh` | Energy that phase constraints prevent from being scheduled |
+
+The control model can choose different targets from the read-only preview.
+No kWh value displayed in the preview is a direct battery power command.
+
+### Recent fork versions and validation
+
+- **v1.6.6:** Selected upstream 1.6.1 reliability/performance backports:
+  smaller Recorder footprint, safer restore/reload handling, solar computation
+  caching, more complete configuration invalidation and physical charging
+  limits including household load and unequal phase headroom.
+- **v1.6.7:** Corrected the 22:00 zero-remaining-solar guard and phase needs
+  hidden by a healthy global energy balance; added phase-local charge
+  reservations and better diagnostics.
+- **v1.6.8:** Active HC recalculation every 30 minutes, phase SOC/load
+  monitoring, dated AROME revision monitoring, and retention of accepted SOC
+  holds until 06:00.
+
+Tests and CI jobs are included in the repository, including
+`scripts/test_tempo_preview_isolated.py`,
+`scripts/test_time_slot_recheck_isolated.py`,
+`scripts/test_predictive_soc_hold.py`, and the
+`tests/test_time_slot_phase_recheck.py` Home Assistant integration suite.
+These tests simulate device I/O; a complete live-Hardware validation is
+still required for a production installation.
+
+For detailed changes, see [CHANGELOG.md](CHANGELOG.md).
+
 ## Testbed Configuration
 
 - **Batteries**: 1× Marstek Venus E v2, 1x Marstek Venus E v3 and 1x Zendure Solarflow 2400 AC+.
@@ -128,38 +282,3 @@ After migration, system entities keep their old `marstek_venus_system_*` IDs. If
 ## Acknowledgements
 
 Special thanks to [ViperRNMC/marstek_venus_modbus](https://github.com/ViperRNMC/marstek_venus_modbus) for the Modbus register documentation that made this integration possible.
-
-
-### Phase-aware predictive charging (L1/L2/L3)
-
-For a three-phase fleet with three explicitly mapped, enabled Phase PD channels,
-the global predictive energy calculation remains **unchanged**. A second
-allocation stage distributes the **same** planned grid-charge kWh based on
-learned daytime net demand for L1, L2, and L3, while respecting each battery's
-remaining SOC headroom.
-
-- Samples are taken from each configured phase grid meter (with its configured
-  fallback) and corrected with **measured** AC battery power. A phase's net
-  demand is `max(0, grid_power - battery_ac_power)` in controller sign convention.
-  This is *residual demand after PV*, not gross house consumption; the feature
-  does not invent per-phase solar generation.
-- Profiles are persisted for up to 28 days. Only the 06:00–22:00 local daytime
-  period is used for weighting, and only days with >=10 hours of valid
-  telemetry **on every phase** count. At least three completed days are
-  required; up to seven recent complete days are averaged.
-- EV charging sessions identified by Omnibattery, or an active **Pause recharge
-  VE**, are excluded so exceptional car loads do not bias the battery forecast.
-- With missing/stale phase meters, incomplete historical coverage, invalid
-  phase assignments, or too little measured net demand, allocation automatically
-  falls back to the existing charge-headroom proportions.
-- The allocator caps each battery at its available room and redistributes any
-  excess share. It never increases the global planned kWh, adjusts contracted
-  import limits, overrides SOC ceilings, or changes PD/EV pause ownership.
-- `switch.*predictive_charging` exposes `phase_energy_allocation` attributes
-  after predictive targets are calculated, including source, forecast
-  confidence and per-battery allocated kWh. These are diagnostics, not
-  instantaneous measured battery powers.
-
-After installing the update, allow at least **three sufficiently covered days**
-for a phase-based forecast. Until then, behaviour is identical to the existing
-global predictive charge allocator.
