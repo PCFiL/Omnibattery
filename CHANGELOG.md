@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.6.9] - 2026-11-26
+
+### Solar charging during Tempo red peak hours
+
+- Fix a per-phase handover guard that repeatedly stopped every positive
+  charging command during red peak hours (06:00–22:00), including normal
+  solar-surplus absorption. This could alternate brief charging and standby
+  while the phase continued exporting and the battery remained below its
+  configured maximum SOC.
+- Use the existing forced-charge ownership handover to stop the overnight
+  grid charge once at 06:00, retrying an unacknowledged stop before normal PD
+  resumes. Startup/reload still requires an acknowledged standby command.
+- Let normal phase PD maintain and adjust solar charging throughout the day,
+  including red days. Predictive grid-charge permissions, consecutive-red
+  preparation, manual/EV ownership, SOC/hysteresis, meter and power safeguards
+  retain their existing behavior.
+- Add multi-cycle regression coverage for daytime solar absorption and the
+  night-to-day handover to the phase-transition and nightly-charging CI suites.
+
 ## [1.6.8] - 2026-11-18
 
 ### Phase-aware Time Slot recalculation during HC

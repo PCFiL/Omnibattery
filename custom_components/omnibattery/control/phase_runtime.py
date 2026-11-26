@@ -679,7 +679,9 @@ class PhaseRuntime:
             # End-of-window/target/disable handover precedes PD deadband and
             # pacing. Always request zero, including a nonzero write whose ACK
             # failed while the planner still remembers zero. Retry failures.
-            state = self.manager.planner.states[channel.battery_key]
+            # This ownership handover also stops the overnight Tempo charge at
+            # 06:00. Once released, a positive command can be normal solar
+            # absorption and must not be stopped merely because it is red HP.
             previous_owner = self._last_grid_charge_owner.get(phase)
             if previous_owner in ("predictive", "soc_recovery", "tempo", "weekly"):
                 stopped = await self._force_zero(channel, battery, now=now)
@@ -688,20 +690,6 @@ class PhaseRuntime:
                     continue
                 self._last_grid_charge_owner.pop(phase, None)
                 self.safety_status[phase] = f"{previous_owner}_released"
-                continue
-
-            # Hard handover at 06:00 on red days: remove any residual
-            # overnight charging command before normal phase PD resumes.
-            if getattr(ctl, "_tempo_red_peak_active", False) and state.last_command_w > 0:
-                ok = await ctl._set_battery_power(
-                    battery, 0, 0, owner=f"phase:{phase}", force_write=True,
-                )
-                self._reserve_grid_charge_attempt(phase, 0, accepted=ok)
-                if ok:
-                    self.manager.acknowledge(phase, 0, now=now)
-                    self.safety_status[phase] = "tempo_red_peak_charge_stopped"
-                else:
-                    self.safety_status[phase] = "tempo_red_peak_stop_unconfirmed"
                 continue
 
             proposed = self.manager.plan(

@@ -11,10 +11,10 @@
 - Hoymiles MS-A2 and HiBattery MQTT models
 
 > [!NOTE]
-> **PCFiL fork (v1.6.8):** This repository includes additional three-phase
+> **PCFiL fork (v1.6.9):** This repository includes additional three-phase
 > predictive charging, EDF Tempo, AROME forecasting and safety improvements
 > beyond the [original ffunes/Omnibattery project](https://github.com/ffunes/Omnibattery).
-> See [fork-specific behaviour](#pcfil-fork-three-phase-predictive-charging-v168)
+> See [fork-specific behaviour](#pcfil-fork-three-phase-predictive-charging-v169)
 > and the [changelog](CHANGELOG.md). Features documented on the original
 > project's website may differ from this fork.
 
@@ -61,7 +61,7 @@ Full documentation (configuration, features, entities, troubleshooting) is avail
 
 **[Upstream Omnibattery documentation](https://ffunes.github.io/Omnibattery/)** (general features).
 
-For this fork's additional features, see the [three-phase charging guide below](#pcfil-fork-three-phase-predictive-charging-v168), [Tempo preview and phase recovery](docs/tempo-preview.md), [EDF Tempo](site-docs/features/edf-tempo.md), [AROME solar forecasts](site-docs/features/arome-solar-forecast.md), and [CHANGELOG.md](CHANGELOG.md).
+For this fork's additional features, see the [three-phase charging guide below](#pcfil-fork-three-phase-predictive-charging-v169), [Tempo preview and phase recovery](docs/tempo-preview.md), [EDF Tempo](site-docs/features/edf-tempo.md), [AROME solar forecasts](site-docs/features/arome-solar-forecast.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Requirements
 
@@ -138,7 +138,7 @@ If the old config entries were deleted from *Settings → Devices & Services* be
 
 After migration, system entities keep their old `marstek_venus_system_*` IDs. If you want to rename them, go to **Settings → Devices & Services → Omnibattery → ⋯ → Recreate entity IDs**. This renames them in-place with history preserved, but any automations, templates, or Energy dashboard entries that reference the old IDs must be updated manually.
 
-## PCFiL fork: three-phase predictive charging (v1.6.8)
+## PCFiL fork: three-phase predictive charging (v1.6.9)
 
 The PCFiL fork keeps the original battery integrations and PD regulation while
 adding EDF Tempo-aware, per-phase **Time Slot** charging. The scenario is three
@@ -182,7 +182,7 @@ For the EDF Tempo setup, authorized grid-charging hours are **22:00–06:00
 Europe/Paris**, including the period across midnight. Charging is evaluated
 at the beginning of the permitted slot and blocked outside that window.
 
-| Situation | Behaviour in v1.6.8 |
+| Situation | Behaviour in v1.6.9 |
 | --- | --- |
 | Entering a configured HC window | Immediate evaluation with current SOC and forecasts |
 | Predictive grid charging **active** | Full re-evaluation after **30 minutes** |
@@ -208,7 +208,11 @@ EV pause suspends charging.
 
 - **Confirmed Tempo red day:** The configured preparation can request
   **100% SOC** during permitted off-peak hours. Red-day peak hours do not
-  authorize tariff-driven grid charging.
+  authorize tariff-driven grid charging. At 06:00 the overnight charge is
+  stopped before normal phase regulation resumes. Daytime solar surplus can
+  then charge each battery up to its configured SOC limit, including on red
+  days; an existing solar charge is not repeatedly cancelled by the red-day
+  protection.
 - **Weekly full charge:** Uses the configured day/start/end times and existing
   hysteresis instead of hard-coded schedules. It retains priority over an
   ordinary predictive target while active.
@@ -262,12 +266,16 @@ No kWh value displayed in the preview is a direct battery power command.
 - **v1.6.8:** Active HC recalculation every 30 minutes, phase SOC/load
   monitoring, dated AROME revision monitoring, and retention of accepted SOC
   holds until 06:00.
+- **v1.6.9:** Sustained daytime solar charging during Tempo red peak hours,
+  with the acknowledged 06:00 grid-charge handover retained.
 
 Tests and CI jobs are included in the repository, including
 `scripts/test_tempo_preview_isolated.py`,
 `scripts/test_time_slot_recheck_isolated.py`,
 `scripts/test_predictive_soc_hold.py`, and the
 `tests/test_time_slot_phase_recheck.py` Home Assistant integration suite.
+`tests/test_tempo_daytime_solar.py` covers successive solar-regulation cycles
+and the transition from overnight grid charging to daytime operation.
 These tests simulate device I/O; a complete live-Hardware validation is
 still required for a production installation.
 

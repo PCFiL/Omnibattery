@@ -26,7 +26,12 @@ EDF Tempo, RTE Tempo and Tarif EDF Home Assistant integrations.
 - Between midnight and 06:00 the already-started civil-day color is used;
   RTE's tariff-day boundary remains 06:00. Do not reset at midnight.
 - On red days 06:00–22:00, no predictive *grid* charge is launched.
-  Phase PD continues local consumption matching to the configured SOC floors.
+  The overnight charge is stopped through its phase ownership handover;
+  unacknowledged stops are retried before normal regulation resumes.
+  Phase PD then absorbs local solar surplus up to the configured maximum SOC
+  and discharges to cover local consumption down to the configured SOC floor.
+  A solar charging command can remain active across successive control cycles;
+  the red-day protection does not cancel it just because it is positive.
 - Consecutive red days: each night beginning at 22:00 independently reloads
   the batteries. A Friday red followed by Saturday blue does not force a
   Friday-night recharge.
