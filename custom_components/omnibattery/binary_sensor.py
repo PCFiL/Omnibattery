@@ -509,6 +509,7 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
         "active_slot_per_battery", "manual_slot_owned",
         "daily_consumption_history",
         "predictive_target_soc_pct", "selected_hours",
+        "phase_predictive_soc_hold", "phase_predictive_reserve_recharge",
         # per-cycle accumulators
         "household_consumption_full_day_kwh",
         # last-decision diagnostic dump (changes on every evaluation)
@@ -547,8 +548,14 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
 
     @property
     def is_on(self):
-        """Return true if predictive charging is active."""
-        return self.controller.grid_charging_active
+        """Report an active charge request, not proof of delivered power."""
+        return bool(self.controller.grid_charging_active or self._reserve_recharge_status())
+
+    def _reserve_recharge_status(self) -> dict:
+        """Read current, time-gated reserve requests without changing control."""
+        runtime = getattr(self.controller, "_phase_runtime", None)
+        requests = getattr(runtime, "predictive_reserve_recharge_status", {})
+        return requests if isinstance(requests, dict) else {}
 
     @property
     def extra_state_attributes(self):
@@ -558,6 +565,17 @@ class PredictiveChargingStatusSensor(BinarySensorEntity):
             "last_evaluation_soc": self.controller.last_evaluation_soc,
             "overridden": self.controller.predictive_charging_overridden,
         }
+        reserve_requests = self._reserve_recharge_status()
+        attrs["forecast_grid_charging_active"] = bool(
+            getattr(self.controller, "grid_charging_active", False)
+        )
+        attrs["predictive_reserve_recharge_requested"] = bool(reserve_requests)
+        attrs["phase_predictive_reserve_recharge"] = reserve_requests
+        runtime = getattr(self.controller, "_phase_runtime", None)
+        hold_status = getattr(runtime, "predictive_soc_hold_status", {})
+        attrs["phase_predictive_soc_hold"] = (
+            hold_status if isinstance(hold_status, dict) else {}
+        )
 
         if self.controller.charging_time_slots:
             attrs["time_slots"] = self.controller.charging_time_slots

@@ -15,7 +15,9 @@ SOC targets** to each phase owner.
   that target releases the recovery request; a higher predictive target can
   then continue in the same authorized night.
 - **Ordinary predictive charge**: charges only if the existing predictive
-  mode has authorised a grid-charging slot and calculated a pending SOC target.
+  mode has authorised a grid-charging slot and calculated a pending SOC target,
+  or an already approved morning reserve needs restoration in a current
+  configured Time Slot.
 - **Normal phase PD**: controls surplus absorption/house supply otherwise.
 
 ## Evaluation order and charging permission
@@ -49,7 +51,7 @@ automatic request:
 | 1 | Tempo preparation to 100% | Tempo control is enabled, the relevant red day is confirmed, predictive charging is enabled and not paused, and the pre-red off-peak window is open. |
 | 2 | Weekly full charge | The configured weekly window is active and any selected solar delay is released. Each battery charges or rests according to its retained full SOC and hysteresis until the scheduled finish. |
 | 3 | Low-SOC recovery | Recovery is enabled for that phase, its threshold has been crossed or its request is already latched, and the HC window is open. It releases at its configured recovery target. |
-| 4 | Ordinary predictive charge | The selected mode has authorized grid charging and that battery's calculated target is still above its current SOC. |
+| 4 | Ordinary predictive charge / reserve restoration | The selected mode has authorized grid charging and that battery's calculated target is pending; or its retained morning reserve needs a top-up within a configured HC Time Slot. |
 | 5 | Normal Phase PD | No higher request applies. It absorbs surplus or supplies the house within the ordinary limits. |
 
 A recovery request is evaluated by the phase dispatcher even when the normal
@@ -71,6 +73,49 @@ Implementation references: the
 (`async_update_charge_discharge`, `_run_control_cycle`) and
 [phase dispatcher](https://github.com/PCFiL/Omnibattery/blob/main/custom_components/omnibattery/control/phase_runtime.py)
 (`PhaseRuntime.run`).
+
+## Morning reserves on heavily loaded phases
+
+An approved per-phase SOC target is retained until **06:00 Europe/Paris**,
+even if a later solar forecast reduces the ordinary grid-charge quota.
+The target comes from the live controller; a preview cannot create it.
+This is particularly relevant to a phase carrying electric heating and an
+overnight water heater: ordinary phase PD must not consume that reserve
+just because the phase exceeds its budget for additional grid charging.
+
+The Tempo per-phase import setting remains a limit on **new charging**.
+Reserve retention yields to genuine configured current, global power and
+capacity protections. The safety calculation includes the extra grid import
+that stopping an existing battery discharge would cause. If a real protection
+uses part of the reserve, the phase can restore it when headroom returns.
+
+Reserve restoration requires all of the following: predictive Time Slot
+mode enabled, a valid retained target for the same battery and HC night,
+an enabled configured window covering the current time and weekday, and
+an available battery without a competing manual/backup/calibration owner
+or EV pause. It uses the battery's configured charge hysteresis and respects
+its current SOC ceilings and all guarded power limits. Its latch survives
+a reload; it cannot extend charging beyond the configured window or 06:00.
+
+Phase-local planning also keeps its morning deadline across midnight. When
+the horizon includes the next evening's 22:00 window, that later night cannot
+supply the reserve needed this morning. Split windows in the current night
+are supported, and a shorter configured night has its own earlier deadline.
+Mature per-phase needs are already net of measured PV: later aggregate solar
+and grid-supplied house load during charging do not cancel those reserves.
+Global and local needs overlap rather than being added twice. A requirement
+that cannot fit the available battery capacity, power or time remains an
+explicit shortfall.
+
+The predictive and integration status entities expose
+`predictive_reserve_recharge_requested`, `phase_predictive_reserve_recharge`
+(battery, target and expiry), and `phase_predictive_soc_hold`.
+`forecast_grid_charging_active` keeps the original forecast request separate.
+These values describe eligible requests, not measured delivered power.
+Reading them does not re-plan, change the controller's flags or write to a
+battery. The phase-demand model still averages mature recent-day observations;
+this correction does not introduce a separate weekend forecast or a fixed
+morning SOC percentage.
 
 ## Deep-discharge protection settings
 

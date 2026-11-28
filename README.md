@@ -11,10 +11,10 @@
 - Hoymiles MS-A2 and HiBattery MQTT models
 
 > [!NOTE]
-> **PCFiL fork (v1.6.9):** This repository includes additional three-phase
+> **PCFiL fork (v1.6.10):** This repository includes additional three-phase
 > predictive charging, EDF Tempo, AROME forecasting and safety improvements
 > beyond the [original ffunes/Omnibattery project](https://github.com/ffunes/Omnibattery).
-> See [fork-specific behaviour](#pcfil-fork-three-phase-predictive-charging-v169)
+> See [fork-specific behaviour](#pcfil-fork-three-phase-predictive-charging-v1610)
 > and the [changelog](CHANGELOG.md). Features documented on the original
 > project's website may differ from this fork.
 
@@ -61,7 +61,7 @@ Full documentation (configuration, features, entities, troubleshooting) is avail
 
 **[Upstream Omnibattery documentation](https://ffunes.github.io/Omnibattery/)** (general features).
 
-For this fork's additional features, see the [three-phase charging guide below](#pcfil-fork-three-phase-predictive-charging-v169), [Tempo preview and phase recovery](docs/tempo-preview.md), [EDF Tempo](site-docs/features/edf-tempo.md), [AROME solar forecasts](site-docs/features/arome-solar-forecast.md), and [CHANGELOG.md](CHANGELOG.md).
+For this fork's additional features, see the [three-phase charging guide below](#pcfil-fork-three-phase-predictive-charging-v1610), [Tempo preview and phase recovery](docs/tempo-preview.md), [EDF Tempo](site-docs/features/edf-tempo.md), [AROME solar forecasts](site-docs/features/arome-solar-forecast.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Requirements
 
@@ -138,7 +138,7 @@ If the old config entries were deleted from *Settings → Devices & Services* be
 
 After migration, system entities keep their old `marstek_venus_system_*` IDs. If you want to rename them, go to **Settings → Devices & Services → Omnibattery → ⋯ → Recreate entity IDs**. This renames them in-place with history preserved, but any automations, templates, or Energy dashboard entries that reference the old IDs must be updated manually.
 
-## PCFiL fork: three-phase predictive charging (v1.6.9)
+## PCFiL fork: three-phase predictive charging (v1.6.10)
 
 The PCFiL fork keeps the original battery integrations and PD regulation while
 adding EDF Tempo-aware, per-phase **Time Slot** charging. The scenario is three
@@ -163,6 +163,12 @@ can create a phase-local charge reservation even when L2 is already full.
    headroom. An infeasible target is reported as a shortfall; it is **not**
    silently moved to another phase.
 
+Phase-local reserves must be stored by the end of the **first authorized HC
+night**, including after midnight when the planning horizon also contains
+the following night's windows. A high aggregate solar forecast cannot cancel
+a learned phase-local need that is already net of PV. Household consumption
+fed directly by the grid during charging does not replace that stored energy.
+
 Phase history is stored for up to 28 days. At least **three completed days**
 with at least **10 hours of valid 06:00–22:00 measurements on all three
 phases** are required for mature daytime predictions. Up to seven eligible
@@ -182,7 +188,7 @@ For the EDF Tempo setup, authorized grid-charging hours are **22:00–06:00
 Europe/Paris**, including the period across midnight. Charging is evaluated
 at the beginning of the permitted slot and blocked outside that window.
 
-| Situation | Behaviour in v1.6.9 |
+| Situation | Behaviour in v1.6.10 |
 | --- | --- |
 | Entering a configured HC window | Immediate evaluation with current SOC and forecasts |
 | Predictive grid charging **active** | Full re-evaluation after **30 minutes** |
@@ -203,6 +209,14 @@ Previously approved per-phase SOC reservations are kept until **06:00**
 even if a revised prediction lowers the required *charging target*.
 A manual takeover or predictive disable cancels the reservation, while
 EV pause suspends charging.
+
+If an approved reserve falls below its target, the phase can restore it
+within a currently configured Time Slot, using the battery's charge
+hysteresis, even after the ordinary predictive quota has finished. This
+request survives a reload and ends at 06:00. Heavy heating demand exceeding
+the Tempo **charging** import budget alone no longer releases the reserve
+for discharge. Actual configured phase-current/global-power protections
+still take priority, and the charging budget continues to limit top-ups.
 
 ### Tempo, weekly full charge and SOC recovery
 
@@ -234,8 +248,9 @@ future day is shown as **unavailable / — kWh**, *not* as 0 kWh; this does
 **not** mean the current night's charge is blocked.
 
 Inspect the control-owned
-`binary_sensor.omnibattery_predictive_charging_active` for the **actual**
-Time Slot decision. Useful attributes include:
+`binary_sensor.omnibattery_predictive_charging_active` for an active forecast
+or reserve-recharge request. An active request is not proof of delivered
+charging power. Useful attributes include:
 
 | Attribute | Meaning |
 | --- | --- |
@@ -246,10 +261,16 @@ Time Slot decision. Useful attributes include:
 | `time_slot_daytime_phase_forecast_kwh` | Learned net daytime demand by phase |
 | `time_slot_next_day_solar_kwh` | Available dated solar estimate for the target day, or unavailable |
 | `phase_daytime_minimum_kwh` | Minimum storage requirement per battery where phase learning is available |
+| `phase_daytime_deadline` | End of the authorized HC night supplying the coming morning's reserve |
 | `phase_charge_energy_requested_kwh` | Requested charging energy per battery |
 | `phase_charge_energy_targets_kwh` | Physically bounded charging energy per battery |
 | `active_slot_energy_target_kwh` | Current executable Time Slot quota |
-| `phase_charge_shortfall_kwh` | Energy that phase constraints prevent from being scheduled |
+| `phase_charge_shortfall_kwh` | Unserved part of the active phase allocation; later authorized slots can cover remaining needs |
+| `total_shortfall_kwh` / `deadline_shortfall_kwh` | Missing energy across the chronological plan or before its required deadlines |
+| `forecast_grid_charging_active` | Original forecast/quota charging request, separate from reserve restoration |
+| `predictive_reserve_recharge_requested` | An approved reserve currently needs a permitted top-up |
+| `phase_predictive_reserve_recharge` | Battery, approved target SOC and expiry for each eligible top-up |
+| `phase_predictive_soc_hold` | Retained SOC target, expiry and holding/safety/pause state per phase |
 
 The control model can choose different targets from the read-only preview.
 No kWh value displayed in the preview is a direct battery power command.
@@ -268,6 +289,9 @@ No kWh value displayed in the preview is a direct battery power command.
   holds until 06:00.
 - **v1.6.9:** Sustained daytime solar charging during Tempo red peak hours,
   with the acknowledged 06:00 grid-charge handover retained.
+- **v1.6.10:** Morning phase reserves survive heavy heating loads and sunny
+  replans, use the current night's deadline after midnight, and can be
+  restored within an authorized Time Slot if subsequently consumed.
 
 Tests and CI jobs are included in the repository, including
 `scripts/test_tempo_preview_isolated.py`,
@@ -276,6 +300,9 @@ Tests and CI jobs are included in the repository, including
 `tests/test_time_slot_phase_recheck.py` Home Assistant integration suite.
 `tests/test_tempo_daytime_solar.py` covers successive solar-regulation cycles
 and the transition from overnight grid charging to daytime operation.
+`tests/test_phase_morning_reserve.py` and the
+`tests/test_predictive_reserve_*.py` suites cover phase-local planning,
+retention, hysteresis, persistence, safety and diagnostic requests.
 These tests simulate device I/O; a complete live-Hardware validation is
 still required for a production installation.
 

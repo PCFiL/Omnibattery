@@ -99,7 +99,7 @@ def _three_phase_manager(forecast_daytime):
     batteries = []
     channels = []
     for phase, soc in zip(("L1", "L2", "L3"), (90.0, 90.0, 14.0)):
-        battery = SimpleNamespace(
+        battery = Battery(
             name=phase, min_soc=10.0, max_soc=100.0,
             max_charge_power=3000.0, max_discharge_power=3000.0,
             data={"battery_soc": soc, "battery_total_energy": 8.0},

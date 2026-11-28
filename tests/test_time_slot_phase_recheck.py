@@ -176,13 +176,25 @@ async def test_exact_0600_gate_wins_over_periodic_recheck():
     mgr._current_horizon_grid_charging_decision.return_value = {"should_charge":True}
     await mgr.handle_time_slot_predictive_charging()
     n = mgr._current_horizon_grid_charging_decision.await_count
+    dispatched = ctrl._handle_predictive_grid_charging.await_count
+    ctrl._phase_predictive_targets = {}
+    ctrl._predictive_charge_target_soc = None
     now[0] = datetime(2026, 11, 19, 6, 0)
     mgr._record_predictive_shortfall = lambda _mode: 0.0
     mgr._reset_predictive_demand_runtime = lambda: None
     mgr._hass.services = SimpleNamespace(async_call=AsyncMock())
     await mgr.handle_time_slot_predictive_charging()
     assert not ctrl.grid_charging_active
-    assert mgr._current_horizon_grid_charging_decision.await_count == n
+    # A daily read-only preview is allowed at 06:00. It must not enter the
+    # active-window dispatcher or manufacture executable phase/SOC targets.
+    assert mgr._current_horizon_grid_charging_decision.await_count == n + 1
+    assert ctrl._last_decision_data["time_slot_evaluation_context"] == "outside_window"
+    assert ctrl._handle_predictive_grid_charging.await_count == dispatched
+    assert ctrl._phase_predictive_targets == {}
+    assert ctrl._predictive_charge_target_soc is None
+    assert ctrl._active_time_slot_quota_kwh is None
+    assert not ctrl._grid_charging_initialized
+    assert ctrl._time_slot_active_window is None
     assert ctrl._time_slot_last_inputs is None
 
 

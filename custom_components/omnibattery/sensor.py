@@ -1000,6 +1000,12 @@ class IntegrationStatusSensor(SensorEntity):
             if cooldown_until and now < cooldown_until
         ]
 
+    def _reserve_recharge_status(self) -> dict:
+        """Read current reserve charge requests, not inferred delivery."""
+        runtime = getattr(self._controller, "_phase_runtime", None)
+        requests = getattr(runtime, "predictive_reserve_recharge_status", {})
+        return requests if isinstance(requests, dict) else {}
+
     @property
     def native_value(self) -> str:
         """Return the current integration status as a translation key."""
@@ -1010,7 +1016,9 @@ class IntegrationStatusSensor(SensorEntity):
             return "manual"
 
         # Priority 2: Predictive grid charging active
-        if c.predictive_charging_enabled and c.grid_charging_active:
+        if c.predictive_charging_enabled and (
+            c.grid_charging_active or self._reserve_recharge_status()
+        ):
             return "grid_charging"
 
         # Priority 3: Weekly full charge in progress
@@ -1093,6 +1101,7 @@ class IntegrationStatusSensor(SensorEntity):
     def extra_state_attributes(self) -> dict:
         """Return current controller details for diagnostics."""
         c = self._controller
+        reserve_requests = self._reserve_recharge_status()
         attrs = {
             "setpoint_active": c.compute_active_target(),
             "previous_power_w": c.previous_power,
@@ -1106,11 +1115,19 @@ class IntegrationStatusSensor(SensorEntity):
                 coordinator.name for coordinator in c.coordinators
                 if not getattr(coordinator, "battery_manual_mode_enabled", False)
             ],
-            "grid_charging_active": c.grid_charging_active,
+            "grid_charging_active": bool(c.grid_charging_active or reserve_requests),
+            "forecast_grid_charging_active": bool(c.grid_charging_active),
+            "predictive_reserve_recharge_requested": bool(reserve_requests),
+            "phase_predictive_reserve_recharge": reserve_requests,
             "price_based_discharge_blocked": c._price_based_discharge_blocked,
             "charge_blocked": c.is_charge_effectively_blocked(),
             "discharge_blocked": c.is_discharge_effectively_blocked(),
         }
+        runtime = getattr(c, "_phase_runtime", None)
+        hold_status = getattr(runtime, "predictive_soc_hold_status", {})
+        attrs["phase_predictive_soc_hold"] = (
+            hold_status if isinstance(hold_status, dict) else {}
+        )
         charge_blockers = c.get_charge_blockers()
         if charge_blockers:
             attrs["charge_blockers"] = charge_blockers

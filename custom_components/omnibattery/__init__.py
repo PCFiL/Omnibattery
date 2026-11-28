@@ -4458,6 +4458,24 @@ class ChargeDischargeController:
         ):
             per_battery_target = self._predictive_charge_target_soc.get(coordinator)
             if per_battery_target is not None:
+                # A fresh solar calculation may lower the current plan after
+                # an earlier target has already been reserved for the morning.
+                # Let the phase writer restore that approved reserve without
+                # being blocked by the lower opportunistic target. The hold
+                # itself checks the configured slot, ownership and SOC caps.
+                runtime = getattr(self, "_phase_runtime", None)
+                hold = getattr(runtime, "_predictive_soc_hold", None)
+                if hold is not None:
+                    channel = next((
+                        c for c in runtime.channels
+                        if c.enabled and c.battery_key == coordinator.name
+                    ), None)
+                    if channel is not None:
+                        restore_target = hold.recharge_target(
+                            channel.phase, coordinator, now=dt_util.now(),
+                        )
+                        if restore_target is not None:
+                            per_battery_target = max(per_battery_target, restore_target)
                 return min(ceiling, per_battery_target), "predictive_target"
 
         if slot_cap is not None:

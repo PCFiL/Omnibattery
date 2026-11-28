@@ -89,6 +89,7 @@ jobs:
               # They simulate device I/O; no live installation is contacted.
               python -m pytest -v --junitxml="$report" \
                 tests/test_phase_runtime.py \
+                tests/test_predictive_reserve_runtime.py \
                 tests/test_tempo_daytime_solar.py \
                 tests/test_phase_live_safety.py \
                 tests/test_phase_dual_meter_stop.py \
@@ -104,6 +105,10 @@ jobs:
               python -m pytest -v --junitxml="$report" \
                 tests/test_nightly_charge_orchestration.py \
                 tests/test_nightly_realistic_inputs.py \
+                tests/test_phase_morning_reserve.py \
+                tests/test_predictive_reserve_runtime.py \
+                tests/test_predictive_reserve_recharge.py \
+                tests/test_predictive_reserve_diagnostics.py \
                 tests/test_zendure_phase_command_feedback.py \
                 tests/test_predictive_options_reenable.py \
                 tests/test_predictive_live_reenable.py \

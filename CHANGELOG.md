@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.6.10] - 2026-11-28
+
+### Keep each phase's approved reserve for the coming morning
+
+- Fix overnight reserve retention on heavily loaded phases. The Tempo
+  per-phase import budget limits additional grid charging; exceeding that
+  budget with heating or hot water no longer authorizes normal PD to drain
+  the reserved SOC. Genuine configured phase-current, global-import and
+  capacity protections still take priority, including the extra import
+  caused by stopping a battery's discharge.
+- Give phase-local daytime reserves the end of the **first authorized HC
+  night** as their deadline. After midnight, a later 22:00 window cannot
+  defer energy needed for the current morning. Split and shorter configured
+  windows retain their own end times.
+- Apply each phase's physical budget before allocating split windows, so
+  energy that cannot fit the first slot can use the next authorized slot
+  in the same night. The budget expires before the following night.
+- Preserve mature per-phase net-of-PV requirements when the aggregate solar
+  forecast is high. Later solar filling and house load supplied directly
+  by the grid during charging cannot cancel energy needed on that phase
+  after HC. Overlapping global and local requirements share the same kWh;
+  infeasible requirements remain reported as shortfalls.
+- Restore an already approved reserve if protection or self-consumption
+  has used it, even after the current predictive quota has finished. This
+  uses the battery's charge hysteresis and survives an integration reload.
+  It requires an enabled, current Time Slot inside 22:00–06:00 Paris,
+  respects manual/EV ownership and configured SOC/power ceilings, and
+  stops at 06:00. No new fixed SOC target or charging window is introduced.
+- Show reserve-recharge requests and their per-phase target/deadline on
+  the predictive and integration status entities. A request is distinct
+  from measured charging power; reading these diagnostics sends no command.
+- Add planner, runtime, persistence, permission and diagnostic regressions
+  to the nightly CI suite, including high L2 heating load, sunny replans,
+  midnight deadlines, limited headroom and the exact 06:00 handover.
+
+Local validation: **518/518** tests in the exact nightly CI selection,
+**65/65** new regression cases, and **45/45** standalone SOC-hold checks.
+The broader 65-file selection has **922 passing tests and two failures**
+already reproduced on `22ce51f8` (the two initial-forecast checks in
+`test_min_soc_floor.py`); no new failure was observed in this selection.
+Tests simulate battery I/O; the full repository suite and live hardware
+were not part of this validation.
+
 ## [1.6.9] - 2026-11-26
 
 ### Solar charging during Tempo red peak hours

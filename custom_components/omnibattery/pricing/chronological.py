@@ -766,9 +766,9 @@ def allocate_price_slots(
         )
     deadline_required = min(required, sum(segment_required.values()))
 
-    # Energy charged ahead of a projected solar fill is clipped, not stored, so
-    # it saves no import (#704).  Only guaranteed-floor energy, needed at its
-    # deadline whatever happens after, is exempt.
+    # Ordinary energy charged ahead of a projected solar fill is clipped, not
+    # stored, so it saves no import (#704). Guaranteed floors and phase-local
+    # reserves must exist at their deadline regardless of later aggregate PV.
     pending_key: tuple[int, float] | None = None
     pending_base: list[tuple[datetime, float, PriceSlot]] = []
 
@@ -943,9 +943,47 @@ def allocate_price_slots(
             or held_through_the_day(slot, deadline)
         )
 
+    # Phase reserves are already learned *net of PV* on each phase. Reserve
+    # their feasible stored energy first: a fleet-wide solar fill cannot
+    # cancel them, and the house load carried by the grid while charging is
+    # not a substitute for energy needed after this HC night. Earliest-first
+    # ordering leaves no idle earlier capacity that an ordinary earlier
+    # deadline would need, and cumulative needs still share these same kWh.
+    phase_reserved: dict[PriceSlot, float] = {}
+    phase_reserve_shortfall = 0.0
+    for deadline in deadlines:
+        if deadline.kind != "phase_daytime":
+            continue
+        start = allocation_start(deadline.deadline)
+        already = sum(
+            amount for slot, amount in allocations.items()
+            if in_segment(slot, start, deadline.deadline)
+        )
+        missing = max(0.0, min(required, deadline.required_cumulative_kwh) - already)
+        for slot in sorted(candidates, key=lambda item: (item.price, item.start)):
+            if not in_segment(slot, start, deadline.deadline):
+                continue
+            free = max(
+                0.0,
+                capacity(slot, deadline.deadline, start) - allocations.get(slot, 0.0),
+            )
+            take = min(missing, free, room_at_start(slot))
+            if take <= _EPSILON:
+                continue
+            allocations[slot] = allocations.get(slot, 0.0) + take
+            phase_reserved[slot] = phase_reserved.get(slot, 0.0) + take
+            previous = allocation_deadlines.get(slot)
+            allocation_deadlines[slot] = (
+                deadline.deadline if previous is None else min(previous, deadline.deadline)
+            )
+            missing -= take
+            if missing <= _EPSILON:
+                break
+        phase_reserve_shortfall = max(phase_reserve_shortfall, missing)
+
     segment_unusable: dict[datetime, float] = {}
     for deadline in deadlines:
-        clip = deadline.kind != "guaranteed_floor"
+        clip = deadline.kind not in {"guaranteed_floor", "phase_daytime"}
         blocked = 0.0
         start = allocation_start(deadline.deadline)
         allocated_before_segment = sum(
@@ -958,7 +996,10 @@ def allocate_price_slots(
             max(0.0, required - allocated_before_segment),
         )
         already = sum(
-            amount
+            # A phase reserve prebooked through 06:00 cannot pretend all its
+            # energy was physically delivered by an earlier ordinary deadline.
+            min(amount, capacity(slot, deadline.deadline, start))
+            if slot in phase_reserved else amount
             for slot, amount in allocations.items()
             if in_segment(slot, start, deadline.deadline)
         )
@@ -1100,7 +1141,9 @@ def allocate_price_slots(
         # inside a charging slot as battery drain, but the grid feeds the
         # house while the slot charges. Charging that load into the battery
         # as well left it well above its floor at sunrise.
-        shortfall = max(0.0, required - sum(allocations.values()))
+        shortfall = max(
+            0.0, required - sum(allocations.values()) - phase_reserve_shortfall
+        )
         covered = 0.0
         carried_deadline = 0.0
         carried_flexible = 0.0
@@ -1123,10 +1166,13 @@ def allocate_price_slots(
                 covered += cover
             # The controller charges from the slot start until the amount is
             # stored, whichever deadline the energy was allocated to.
-            net = min(
-                amount,
-                _net_of_load_carried_by_grid(
-                    intervals, amount + cover, start, end, power * efficiency
+            net = max(
+                phase_reserved.get(slot, 0.0),
+                min(
+                    amount,
+                    _net_of_load_carried_by_grid(
+                        intervals, amount + cover, start, end, power * efficiency
+                    ),
                 ),
             )
             if allocation_deadlines.get(slot) is None:

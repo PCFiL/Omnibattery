@@ -3028,7 +3028,9 @@ class PricingManager:
         charge and guaranteed-SOC owners keep their existing targets and
         priority; the hardware dispatcher still limits all of them live.
         """
-        from .physical_limits import phase_charge_shares, planning_charge_limits
+        from .physical_limits import (
+            phase_charge_shares, planning_charge_limits, reserve_phase_daytime_needs,
+        )
 
         decision_data.pop("phase_charge_energy_targets_kwh", None)
         decision_data.pop("phase_charge_energy_requested_kwh", None)
@@ -3054,7 +3056,16 @@ class PricingManager:
         budget_active = getattr(self, "_planning_phase_budget_active", False)
         shares = getattr(self, "_planning_phase_shares", None) if budget_active else None
         if shares is None or set(shares) != set(coordinators):
-            shares = phase_charge_shares(self._controller, coordinators, room, quota)
+            minimums = getattr(self, "_planning_phase_minimums", None)
+            if minimums is not None and set(minimums) == set(coordinators):
+                # If the timed budget cannot be used, a phase's reserve must
+                # not become relative weights that donate part of its energy
+                # to already-sufficient phases.
+                shares = reserve_phase_daytime_needs(
+                    self._controller, coordinators, room, quota, minimums,
+                )
+            else:
+                shares = phase_charge_shares(self._controller, coordinators, room, quota)
         if shares is None:
             return quota
         active = next((s for s in candidates if s.start <= now < s.end), None)
@@ -3082,7 +3093,7 @@ class PricingManager:
         # Only a single active window owns the full original phase budget.
         # A multi-window plan may serve its remaining need later, so its
         # diagnostic counts only what this active allocation could not serve.
-        requested = sum(shares.values()) if budget_active else quota
+        requested = sum(shares.values()) if budget_active and len(candidates) == 1 else quota
         decision_data["phase_charge_shortfall_kwh"] = round(max(0.0, requested - result), 3)
         return result
 
@@ -3838,8 +3849,8 @@ class PricingManager:
                         # authorized HC windows end. These are cumulative
                         # deadlines, not additional energy counted on top of
                         # the global need; overlapping requirements use max.
-                        charge_deadline = min(
-                            horizon_end, max(slot.end for slot in slots)
+                        charge_deadline = self._phase_daytime_charge_deadline(
+                            now, slots, horizon_end
                         )
                         deadlines.append(EnergyDeadline(
                             charge_deadline, phase_required, "phase_daytime",
@@ -3847,14 +3858,18 @@ class PricingManager:
                         merged_deadlines = []
                         cumulative = 0.0
                         for item in sorted(deadlines, key=lambda x: x.deadline):
-                            if item.required_cumulative_kwh > cumulative + 1e-9:
+                            if (
+                                item.required_cumulative_kwh > cumulative + 1e-9
+                                or item.kind == "phase_daytime"
+                            ):
                                 merged_deadlines.append(item)
-                                cumulative = item.required_cumulative_kwh
+                                cumulative = max(cumulative, item.required_cumulative_kwh)
                         deadlines = merged_deadlines
                         required = max(required, phase_required)
                         decision_data["phase_daytime_deadline"] = (
                             charge_deadline.isoformat()
                         )
+            self._planning_phase_minimums = phase_minimums
             power_kw = min(
                 self._contracted_charge_ceiling(),
                 max(0.0, float(self._controller.max_charge_capacity)),
@@ -3891,15 +3906,20 @@ class PricingManager:
                 # Full-charge/floor owners retain their targets. Ordinary HC
                 # plans stop each phase at its own original energy need.
                 budget_shares = None
+                budget_until = (
+                    self._phase_daytime_charge_deadline(now, slots, horizon_end)
+                    if phase_minimums is not None and sum(phase_minimums.values()) > 1e-9
+                    else None
+                )
                 if (
                     sum(phase_shares.values()) > 1e-9
-                    and len(slots) == 1
+                    and (len(slots) == 1 or budget_until is not None)
                     and slots[0].start <= now < slots[0].end
                     # Future room belongs to the chronological trajectory.
                     # A target based on SOC now must never spend a budget in
                     # a future/PV-clipped window before that charge is chosen.
                     and not any(
-                        item.start < slots[0].end
+                        item.start < (budget_until or slots[0].end)
                         and item.solar_kwh > item.consumption_kwh + 1e-9
                         for item in intervals
                     )
@@ -3911,7 +3931,8 @@ class PricingManager:
                 self._planning_phase_budget_active = budget_shares is not None
                 intervals = apply_phase_charge_capacity(
                     intervals, getattr(self, "_planning_charge_segments", ()),
-                    target_shares=budget_shares, power_kw=power_kw,
+                    target_shares=budget_shares, target_until=budget_until,
+                    power_kw=power_kw,
                     grid_ceiling_kw=self._contracted_charge_ceiling() / 1000.0,
                 )
             # Value deadline energy against the import it displaces (#662)
@@ -4071,6 +4092,34 @@ class PricingManager:
                 "chronological_plan_reason": f"fallback: {exc}",
             })
             return None
+
+    @staticmethod
+    def _phase_daytime_charge_deadline(
+        now: datetime, slots: Sequence[PriceSlot], horizon_end: datetime,
+    ) -> datetime:
+        """Store the next daytime reserve within its own authorized HC night.
+
+        A post-midnight horizon can contain tonight's 22:00 window as well
+        as the current one. That later night cannot supply this morning's
+        reserve. Keep split windows in the first HC night, and use their
+        configured final end (which can be earlier than the 06:00 HC gate).
+        """
+        from ..control.predictive_soc_hold import offpeak_deadline
+
+        first = min(slots, key=lambda slot: slot.start)
+        start = max(now, first.start)
+        aware_start = start.replace(tzinfo=PARIS) if start.tzinfo is None else start
+        night_end = offpeak_deadline(aware_start)
+        if night_end is None:
+            # Executable Time Slot candidates are already clipped to HC.
+            # Retain a bounded first-window deadline for defensive callers.
+            return min(horizon_end, first.end)
+        if now.tzinfo is None:
+            night_end = night_end.replace(tzinfo=None)
+        return min(
+            horizon_end,
+            max(slot.end for slot in slots if slot.start < night_end),
+        )
 
     def _time_slot_price_slots(self, now: datetime) -> list[PriceSlot]:
         """Materialize authorized windows through the current day's midnight."""

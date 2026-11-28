@@ -1,8 +1,9 @@
 """Retain approved per-phase predictive SOC until the current Tempo HC ends.
 
-This manager never computes a charge target and never writes to a battery. It
-only remembers a target already authorized by the live controller and limits
-ordinary phase-PD discharge. All charging and safety ownership stays unchanged.
+This manager never computes a new charge target or writes to a battery. It
+remembers a target already authorized by the live controller, limits ordinary
+phase-PD discharge, and can request restoration of that reserve inside an
+explicitly configured Time Slot. The phase writer still enforces all limits.
 """
 from __future__ import annotations
 
@@ -157,16 +158,93 @@ class PredictiveSocHold:
                     # Manual/disable still clear the record above, and a
                     # higher accepted target legitimately raises this floor.
                     held_target = max(target, stored_soc) if phase in kept else target
-                    kept[phase] = {"identity": identity, "until": until,
-                                   "target_soc": held_target}
+                    kept[phase] = {**kept.get(phase, {}), "identity": identity,
+                                   "until": until, "target_soc": held_target}
             if phase in kept:
                 self.status[phase] = {
                     "target_soc": kept[phase]["target_soc"], "until": until,
                     "state": "paused_ev" if paused else "reserved",
                 }
         self.records = kept
+        for channel in self.channels:
+            phase = channel.phase
+            if phase not in kept:
+                continue
+            battery = batteries[channel.battery_key]
+            # Remember an in-progress top-up through reloads and small SOC
+            # oscillations. An EV pause suspends it without spending its target.
+            target = self.recharge_target(phase, battery, now=now)
+            if not paused and getattr(battery, "is_available", False):
+                kept[phase]["recharge_active"] = target is not None
+            self.status[phase]["recharge_requested"] = target is not None
+            self.status[phase]["recharge_target_soc"] = target
         if self.records != before:
             await self._save()
+
+    def recharge_target(self, phase, battery, *, now):
+        """Restore an approved reserve, only in the user's current Time Slot.
+
+        A sunny replan may remove the live grid-charge request after the target
+        has been reached. If protection or battery self-consumption later uses
+        that energy, holding discharge alone cannot restore the morning SOC.
+        This read-only request uses the stored target and charge hysteresis;
+        it never turns a preview or a new forecast into charge authorization.
+        """
+        ctl = self.controller
+        if (
+            not getattr(ctl, "predictive_charging_enabled", False)
+            or getattr(ctl, "predictive_charging_overridden", False)
+            or getattr(ctl, "manual_mode_enabled", False)
+            or getattr(ctl, "ev_charging_pause_enabled", False)
+            or getattr(ctl, "predictive_charging_mode", None) != "time_slot"
+            or not getattr(battery, "is_available", False)
+            or self._other_owner(battery)
+        ):
+            return None
+        deadline = offpeak_deadline(now)
+        record = self.records.get(phase, {})
+        channel = next((c for c in self.channels if c.phase == phase), None)
+        if (
+            deadline is None or record.get("until") != deadline.isoformat()
+            or channel is None or not channel.enabled
+            or channel.battery_key != battery.name
+            or record.get("identity") != self._identity(channel, battery)
+        ):
+            return None
+        in_slot = getattr(ctl, "_is_in_predictive_charging_slot", None)
+        if not callable(in_slot) or not in_slot():
+            return None
+        target = valid_soc(record.get("target_soc"))
+        current = valid_soc((battery.data or {}).get("battery_soc"))
+        ceiling = valid_soc(getattr(battery, "max_soc", None))
+        if target is None or current is None or ceiling is None:
+            return None
+        # A retained 100% Tempo target is not permission to bypass a later
+        # normal SOC ceiling, or a user lowering an operation slot's ceiling.
+        slot_cap = getattr(ctl, "_slot_charge_soc_max", None)
+        cap = slot_cap(battery) if callable(slot_cap) else None
+        if cap is not None:
+            cap = valid_soc(cap)
+            if cap is None:
+                return None
+            ceiling = min(ceiling, cap)
+        target = min(target, ceiling)
+        if current >= target - 0.2:
+            return None
+        hysteresis = (
+            valid_soc(getattr(battery, "charge_hysteresis_percent", 2.0))
+            if getattr(battery, "enable_charge_hysteresis", True) else 0.0
+        )
+        if hysteresis is None:
+            return None
+        if (
+            record.get("recharge_active") is True
+            # Match the controller's existing strict hysteresis threshold,
+            # including when the retained target equals the normal max SOC.
+            or current < target - max(0.2, hysteresis)
+        ):
+            return target
+        return None
 
     def discharge_limit(self, phase, battery, limit_w, *, now, safety=False):
         """Bound normal discharge, never request a compensating grid charge.

@@ -259,7 +259,8 @@ def planning_charge_limits(controller, coordinators, *, now=None, slots=()):
 
 
 def apply_phase_charge_capacity(
-    intervals, segments, *, target_shares=None, power_kw, grid_ceiling_kw,
+    intervals, segments, *, target_shares=None, target_until=None,
+    power_kw, grid_ceiling_kw,
 ):
     """Project per-phase charge availability into chronological intervals.
 
@@ -268,6 +269,8 @@ def apply_phase_charge_capacity(
     windows have identical synthetic prices, so filling the earliest usable
     interval preserves the greatest chance of meeting every deadline. Each
     phase and the combined grid import remain bounded independently.
+    A protected morning budget can span split HC windows; it expires at that
+    morning's deadline so it cannot cap capacity in the following night.
     """
     from dataclasses import replace
     from ..const import CHARGE_EFFICIENCY
@@ -276,6 +279,8 @@ def apply_phase_charge_capacity(
     result = []
     for interval in intervals:
         edges = {interval.start, interval.end}
+        if target_until is not None and interval.start < target_until < interval.end:
+            edges.add(target_until)
         for start, end, _rates in segments:
             if interval.start < start < interval.end:
                 edges.add(start)
@@ -295,14 +300,15 @@ def apply_phase_charge_capacity(
             if rates is not None:
                 hours = (end - start).total_seconds() / 3600.0
                 available = [max(0.0, watts) / 1000.0 * hours * CHARGE_EFFICIENCY for watts in rates]
-                if remaining is not None:
+                budgeted = remaining is not None and (target_until is None or start < target_until)
+                if budgeted:
                     available = [min(room, energy) for room, energy in zip(remaining, available)]
                 grid_power = max(0.0, grid_ceiling_kw - part.grid_net_load_kwh / hours)
                 combined_limit = min(power_kw, grid_power) * hours * CHARGE_EFFICIENCY
                 total = sum(available)
                 scale = min(1.0, combined_limit / total) if total > 0 else 0.0
                 accepted = [energy * scale for energy in available]
-                if remaining is not None:
+                if budgeted:
                     remaining = [max(0.0, room - energy) for room, energy in zip(remaining, accepted)]
                 part = replace(part, charge_limit_kw=sum(accepted) / (hours * CHARGE_EFFICIENCY))
             result.append(part)

@@ -211,6 +211,18 @@ class PhaseRuntime:
                 else:
                     credit = previous
             self._grid_charge_feedback_w[phase] = credit
+            if (
+                settled and measured == 0 and credit == 0
+                and phase in self._stop_confirmed
+                and attempt is not None and attempt.accepted
+                and attempt.requested_w == 0 and prior.last_command_w < 0
+            ):
+                # A confirmed stop plus settled AC/grid feedback supersedes
+                # an obsolete discharge in the PD history. Otherwise the SOC
+                # hold repeatedly stops that historical command and prevents
+                # a new charge, even though the inverter is already idle.
+                # An ACK alone, or a later nonzero attempt, cannot do this.
+                prior.last_command_w = 0.0
             if attempt is not None:
                 if settled:
                     attempt.reserved_w = attempt.requested_w
@@ -328,7 +340,32 @@ class PhaseRuntime:
                 measured = delivered(battery)
                 if measured is not None and isfinite(float(measured)):
                     release_w = max(release_w, -float(measured))
-            phase_limit = float(ctl.config_entry.data.get("tempo_phase_import_limit_w", 2500))
+            margin = max(50.0, channel.deadband_w)
+            # The Tempo per-phase import setting is a budget for ADDING grid
+            # charge. It is not the phase's breaker rating. Treating it as a
+            # discharge emergency drains an accepted overnight reserve whenever
+            # ordinary heating or a water heater exceeds that charging budget.
+            # Use only an explicitly configured physical current envelope here.
+            limiter = getattr(ctl, "_phase_power_limiter", None)
+            if limiter is not None and getattr(limiter, "enabled", False):
+                physical_phase = limiter._battery_phase(battery)
+                if physical_phase is not None:
+                    snapshot = limiter.phase_snapshot(physical_phase)
+                    if snapshot.get("reason") != "not_configured":
+                        if snapshot.get("degraded"):
+                            return True
+                        from ..const import (
+                            PHASE_BATTERY_POWER_FACTOR, PHASE_NOMINAL_VOLTAGE_V,
+                        )
+                        watts_per_amp = (
+                            PHASE_NOMINAL_VOLTAGE_V * PHASE_BATTERY_POWER_FACTOR
+                        )
+                        reading_a = float(snapshot["reading_a"])
+                        limit_a = float(snapshot["limit_a"])
+                        if not (isfinite(reading_a) and isfinite(limit_a) and limit_a > 0):
+                            return True
+                        if reading_a + release_w / watts_per_amp >= limit_a - margin / watts_per_amp:
+                            return True
             global_state = ctl.hass.states.get(ctl.consumption_sensor)
             global_power = ctl._apply_meter_transform(global_state)
             report = (getattr(global_state, "last_reported", None)
@@ -337,15 +374,11 @@ class PhaseRuntime:
                     or report is None or not ctl._sensor_is_within_stale_tolerance(report)):
                 return True
             global_limit = float(ctl._predictive_charge_ceiling())
-            if not all(isfinite(v) and v > 0 for v in (phase_limit, global_limit)):
+            if not isfinite(global_limit) or global_limit <= 0:
                 return True
-            margin = max(50.0, channel.deadband_w)
             reserved = getattr(self, "_tempo_reserved_increment_w", 0.0)
-            return (
-                phase_grid_w + release_w >= phase_limit - margin
-                or float(global_power) + release_w + reserved >= global_limit - margin
-            )
-        except (AttributeError, TypeError, ValueError, OverflowError):
+            return float(global_power) + release_w + reserved >= global_limit - margin
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             # An uncertain safety envelope must not impose a new stop on the
             # protection/regulation path. It never authorizes extra charging.
             return True
@@ -354,6 +387,29 @@ class PhaseRuntime:
     def predictive_soc_hold_status(self):
         """Read-only per-phase retention diagnostics for the preview sensor."""
         return self._predictive_soc_hold.snapshot() if self._predictive_soc_hold else {}
+
+    @property
+    def predictive_reserve_recharge_status(self):
+        """Current eligible reserve requests, never evidence of delivered W."""
+        hold = self._predictive_soc_hold
+        if hold is None:
+            return {}
+        from homeassistant.util import dt as dt_util
+        now = dt_util.now()
+        requests = {}
+        for channel in self.channels:
+            phase = channel.phase
+            if hold.status.get(phase, {}).get("state") == "suspended_for_safety":
+                continue
+            battery = self.by_name[channel.battery_key]
+            target = hold.recharge_target(phase, battery, now=now)
+            if target is not None:
+                requests[phase] = {
+                    "battery": battery.name,
+                    "target_soc": target,
+                    "until": hold.records[phase]["until"],
+                }
+        return requests
 
     async def run(self):
         ctl = self.controller
@@ -518,9 +574,27 @@ class PhaseRuntime:
             )
             # Reuse the normal solar-aware energy deficit targets generated by
             # PricingManager. The phase owner, not fleet PD, writes the battery.
-            predictive_target = getattr(
-                ctl, "_phase_predictive_targets", {}
-            ).get(battery.name)
+            from .predictive_soc_hold import valid_soc
+            predictive_target = (
+                valid_soc(getattr(ctl, "_phase_predictive_targets", {}).get(battery.name))
+                if getattr(ctl, "grid_charging_active", False) else None
+            )
+            if self._predictive_soc_hold is not None and (
+                self._predictive_soc_hold.status.get(phase, {}).get("state")
+                != "suspended_for_safety"
+            ):
+                # A revised sunny forecast can remove the live quota after
+                # charging finishes. Restore the already authorized morning
+                # reserve if it is later used, within this configured HC slot.
+                # Never let this top-up take ownership from real protection.
+                reserve_target = self._predictive_soc_hold.recharge_target(
+                    phase, battery, now=wall_now,
+                )
+                if reserve_target is not None:
+                    predictive_target = max(
+                        predictive_target if predictive_target is not None else reserve_target,
+                        reserve_target,
+                    )
             from homeassistant.util import dt as dt_util
             from .edf_tempo import is_tempo_offpeak
             predictive_offpeak = is_tempo_offpeak(dt_util.now())
@@ -530,7 +604,6 @@ class PhaseRuntime:
                     predictive_offpeak
                     and getattr(ctl, "predictive_charging_enabled", False)
                     and not getattr(ctl, "predictive_charging_overridden", False)
-                    and getattr(ctl, "grid_charging_active", False)
                     and predictive_target is not None
                     and float(predictive_target) > current_soc + 0.2
                 )
